@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+setup.py
+algo_data_ingestion.egg-info/PKG-INFO
+algo_data_ingestion.egg-info/SOURCES.txt
+algo_data_ingestion.egg-info/dependency_links.txt
+algo_data_ingestion.egg-info/top_level.txt
+app/__init__.py
+app/main.py
+app/models.py
+app/storage.py
+app/features/__init__.py
+tests/__init__.py
+tests/adapters/__init__.py
+tests/adapters/test_ccxt_adapter.py
+tests/features/__init__.py
