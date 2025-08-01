@@ -1,7 +1,8 @@
 # File: tests/adapters/test_ccxt_adapter.py
+from app.adapters.ccxt_adapter import CCXTAdapter, get_ticker_raw
+
 import pytest
-import ccxt
-from adapters.ccxt_adapter import CCXTAdapter, get_ticker_raw
+import ccxt.async_support as ccxt
 
 # sample ticker payload used by both tests
 sample = {
@@ -22,9 +23,15 @@ async def test_fetch_ticker_monkeypatched(monkeypatch):
             pass
 
     # Monkeypatch ccxt.binance
-    monkeypatch.setattr(ccxt, "binance", lambda **kw: DummyExchange())
+    monkeypatch.setattr(
+        ccxt, "binance",
+        lambda *args, **kwargs: DummyExchange()
+    )
 
     adapter = CCXTAdapter("binance")
+    async def dummy_close(self):
+        pass
+    monkeypatch.setattr(CCXTAdapter, "close", dummy_close)
     result = await adapter.fetch_ticker("BTC/USDT")
     await adapter.close()
 
@@ -32,8 +39,12 @@ async def test_fetch_ticker_monkeypatched(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_ticker_raw(monkeypatch):
-    monkeypatch.setattr(CCXTAdapter, "fetch_ticker", lambda self, s: sample)
-    monkeypatch.setattr(CCXTAdapter, "close", lambda self: None)
+    async def dummy_fetch(self, symbol):
+        return sample
+    monkeypatch.setattr(CCXTAdapter, "fetch_ticker", dummy_fetch)
+    async def dummy_close(self):
+        pass
+    monkeypatch.setattr(CCXTAdapter, "close", dummy_close)
 
     raw = await get_ticker_raw("BTC/USDT")
     assert raw == sample
@@ -41,7 +52,7 @@ async def test_get_ticker_raw(monkeypatch):
 # File: tests/adapters/test_reddit_adapter.py
 import pytest
 from datetime import datetime
-from adapters.reddit_adapter import fetch_pushshift
+from app.adapters.reddit_adapter import fetch_pushshift
 
 @pytest.mark.asyncio
 async def test_fetch_pushshift(monkeypatch):
