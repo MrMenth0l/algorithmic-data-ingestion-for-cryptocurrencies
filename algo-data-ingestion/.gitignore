@@ -9,6 +9,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Python bytecode
+__pycache__/
+*.pyc
+
 # Environment variables file
 .env
 
