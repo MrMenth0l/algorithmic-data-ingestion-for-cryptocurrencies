@@ -1,9 +1,24 @@
+# Status: ✅ Exists & handles both REST news and RSS feeds
 import os
 import asyncio
 import httpx
 import feedparser
+import logging
 from typing import List, Dict, Any
 from datetime import datetime
+
+async def _retry_http(method, *args, retries: int = 3, backoff_factor: float = 1.0, **kwargs):
+    for attempt in range(1, retries + 1):
+        try:
+            return await method(*args, **kwargs)
+        except Exception as e:
+            logger.warning(f"HTTP call {method.__name__} failed attempt {attempt}/{retries}: {e}")
+            if attempt < retries:
+                await asyncio.sleep(backoff_factor * 2 ** (attempt - 1))
+    # Last attempt
+    return await method(*args, **kwargs)
+
+logger = logging.getLogger(__name__)
 
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 
@@ -15,7 +30,7 @@ async def fetch_crypto_news(query: str, limit: int) -> List[Dict[str, Any]]:
         "token": NEWS_API_KEY,
     }
     async with httpx.AsyncClient() as client:
-        resp = await client.get(url, params=params)
+        resp = await _retry_http(client.get, url, params=params)
         resp.raise_for_status()
         articles = resp.json().get("data", [])
     results: List[Dict[str, Any]] = []
@@ -37,7 +52,7 @@ async def fetch_rss_feed(feed_url: str, handle_update: callable, poll_interval: 
     seen_ids = set()
     while True:
         async with httpx.AsyncClient() as client:
-            resp = await client.get(feed_url)
+            resp = await _retry_http(client.get, feed_url)
             resp.raise_for_status()
             content = resp.text
         feed = feedparser.parse(content)

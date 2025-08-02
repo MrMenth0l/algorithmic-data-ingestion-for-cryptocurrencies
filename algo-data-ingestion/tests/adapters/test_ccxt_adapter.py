@@ -1,6 +1,7 @@
 import asyncio
 import pytest
 import pandas as pd
+import logging
 
 from datetime import datetime
 from unittest.mock import AsyncMock, patch
@@ -99,3 +100,20 @@ async def test_watch_ticker(dummy_exchange):
         await adapter.watch_ticker("BTC/USDT", cb)
     assert len(events) == 1
     assert events[0]["last"] == 29300
+
+@pytest.mark.asyncio
+async def test_fetch_ticker_retry(dummy_exchange, caplog):
+    # Simulate failure on first attempt, success on second
+    dummy_exchange.fetch_ticker.side_effect = [
+        Exception("Network error"),
+        {"symbol": "BTC/USDT", "last": 250.0}
+    ]
+    adapter = CCXTAdapter("binance")
+    caplog.set_level(logging.WARNING, logger="app.adapters.ccxt_adapter")
+    result = await adapter.fetch_ticker("BTC/USDT")
+    assert result["last"] == 250.0
+    # Check that a warning was logged for the failed attempt
+    assert any(
+        "CCXT call fetch_ticker failed on attempt 1/3" in record.getMessage()
+        for record in caplog.records
+    )
