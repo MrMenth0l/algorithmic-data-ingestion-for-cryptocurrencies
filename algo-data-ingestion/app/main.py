@@ -7,7 +7,7 @@ from .storage import persist_raw
 from .adapters.sentiment_adapter import fetch_twitter_sentiment
 from .adapters.reddit_adapter import fetch_reddit
 from datetime import datetime, timedelta
-from .adapters.news_adapter import fetch_crypto_news
+from .adapters.news_adapter import fetch_news_api, fetch_news_rss
 from .models import NewsEnvelope, NewsItem
 from .adapters.onchain_adapter import fetch_glassnode, fetch_covalent
 from .models import OnchainEnvelope, OnchainItem
@@ -108,7 +108,7 @@ async def get_crypto_news(
     limit: int = Query(10, ge=1, le=50)
 ):
     try:
-        raw = await fetch_crypto_news(section, limit)
+        raw = await fetch_news_api(section, limit)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -130,6 +130,35 @@ async def get_crypto_news(
     except Exception as e:
         print(f"[WARN] failed to persist raw data: {e}")
     return NewsEnvelope(data=items, metadata={"section": section, "fetched_at": datetime.utcnow()})
+
+@app.get("/v1/news/rss", response_model=NewsEnvelope)
+async def get_news_rss(
+    feed_url: str = Query(..., description="RSS feed URL, e.g. https://example.com/rss")
+):
+    try:
+        raw = await fetch_news_rss(feed_url)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    items = [
+        NewsItem(
+            id=art.get("id", ""),
+            title=art.get("title", ""),
+            url=art.get("url", ""),
+            source=art.get("source", ""),
+            author=art.get("author"),
+            description=art.get("description"),
+            published_at=art.get("published_at"),
+        )
+        for art in raw
+    ]
+
+    try:
+        await persist_raw("news", f"rss_{feed_url}", raw)
+    except Exception as e:
+        print(f"[WARN] failed to persist raw RSS data: {e}")
+
+    return NewsEnvelope(data=items, metadata={"feed_url": feed_url, "fetched_at": datetime.utcnow()})
 
 @app.get("/v1/onchain", response_model=OnchainEnvelope)
 async def get_onchain(
