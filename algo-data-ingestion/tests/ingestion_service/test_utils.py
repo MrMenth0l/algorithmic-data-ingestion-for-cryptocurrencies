@@ -3,6 +3,8 @@ import os
 from types import SimpleNamespace
 import pytest
 from app.ingestion_service.utils import write_to_parquet, PARQUET_WRITES_TOTAL, PARQUET_WRITE_ERRORS, PARQUET_WRITE_LATENCY
+from app.ingestion_service.parquet_schemas import MARKET_SCHEMA
+from app.ingestion_service.utils import validate_schema
 
 
 def test_write_to_parquet_skips_empty(tmp_path, caplog, monkeypatch):
@@ -53,3 +55,44 @@ def test_write_to_parquet_error(tmp_path, monkeypatch):
     with pytest.raises(IOError):
         write_to_parquet(df, str(tmp_path), {"year": 2025})
     assert errors["n"] == 1
+
+
+# Schema validation tests
+def test_write_to_parquet_schema_missing_columns(tmp_path):
+    df = pd.DataFrame({"symbol": ["BTC"], "open": [1.0], "high": [2.0]})
+    with pytest.raises(ValueError) as exc:
+        validate_schema(df, MARKET_SCHEMA, coerce=False)
+    msg = str(exc.value)
+    assert "Missing columns" in msg
+    assert "timestamp" in msg
+
+
+def test_write_to_parquet_schema_wrong_dtype(tmp_path):
+    df = pd.DataFrame({
+        "timestamp": ["2025-08-01T00:00:00Z"],
+        "symbol": ["BTC-USDT"],
+        "open": [1.0],
+        "high": [2.0],
+        "low": [0.5],
+        "close": [1.5],
+        "volume": [100.0]
+    })
+    with pytest.raises(ValueError) as exc:
+        validate_schema(df, MARKET_SCHEMA, coerce=False)
+    assert "Wrong dtype for column 'timestamp'" in str(exc.value)
+
+
+def test_write_to_parquet_schema_coerce_int_to_float(tmp_path):
+    # DataFrame with volume as int (should coerce to float64)
+    df = pd.DataFrame({
+        "timestamp": pd.to_datetime(["2025-08-01T00:00:00Z"], utc=True),
+        "symbol": ["BTC-USDT"],
+        "open": [1],   # int, will coerce to float
+        "high": [2],   # int
+        "low": [1],    # int
+        "close": [1],  # int
+        "volume": [100]# int
+    })
+    # Should succeed and write file
+    path = write_to_parquet(df, str(tmp_path), {"exchange": "binance", "symbol": "BTC-USDT"})
+    assert os.path.exists(path)
