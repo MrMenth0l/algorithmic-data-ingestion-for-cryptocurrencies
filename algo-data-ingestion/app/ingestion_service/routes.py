@@ -24,6 +24,9 @@ async def ingest_market(exchange: str, body: MarketIngestRequest):
     }
     try:
         path = write_to_parquet(df, base, partitions)
+    except ValueError as ve:
+        # Schema validation failure
+        raise HTTPException(status_code=422, detail=str(ve))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Write failed: {e}")
     if path is None:
@@ -59,6 +62,9 @@ async def ingest_onchain(source: str, body: OnchainIngestRequest):
         raise HTTPException(status_code=400, detail=f"Unknown onchain source: {source}")
     try:
         path = write_to_parquet(df, base, partitions)
+    except ValueError as ve:
+        # Schema validation failure
+        raise HTTPException(status_code=422, detail=str(ve))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Write failed: {e}")
     if path is None:
@@ -86,6 +92,9 @@ async def ingest_social(platform: str, body: SocialIngestRequest):
     }
     try:
         path = write_to_parquet(df, base, partitions)
+    except ValueError as ve:
+        # Schema validation failure
+        raise HTTPException(status_code=422, detail=str(ve))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Write failed: {e}")
     if path is None:
@@ -112,6 +121,9 @@ async def ingest_news(body: NewsIngestRequest):
     }
     try:
         path = write_to_parquet(df, base, partitions)
+    except ValueError as ve:
+        # Schema validation failure
+        raise HTTPException(status_code=422, detail=str(ve))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Write failed: {e}")
     if path is None:

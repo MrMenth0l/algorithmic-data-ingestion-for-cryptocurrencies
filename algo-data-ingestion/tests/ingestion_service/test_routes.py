@@ -259,3 +259,67 @@ def test_ingest_news_api_write_error(client, monkeypatch):
     response = client.post("/ingest/news", json={"source_type":"api","category":"crypto"})
     assert response.status_code == 500
     assert "Write failed" in response.json()["detail"]
+
+
+# Schema validation error for Market
+def test_ingest_market_schema_validation_error(client, monkeypatch):
+    # Missing 'timestamp'
+    df = pd.DataFrame({"open": [1.0], "high": [2.0], "low": [0.5], "close": [1.5], "volume": [100.0]})
+    async def fake_fetch(symbol, gr):
+        return df
+    monkeypatch.setattr(
+        "app.ingestion_service.routes.CCXTAdapter",
+        lambda exchange: SimpleNamespace(fetch_ohlcv=fake_fetch)
+    )
+    # write_to_parquet shouldn't be reached; route should return 422
+    response = client.post(
+        "/ingest/market/binance",
+        json={"symbol": "BTC-USDT", "granularity": "1m"}
+    )
+    assert response.status_code == 422
+    assert "Missing columns" in response.json()["detail"]
+
+# Schema validation error for On-Chain
+def test_ingest_onchain_schema_validation_error(client, monkeypatch):
+    # Missing 'timestamp'
+    df = pd.DataFrame({"source": ["glassnode"], "symbol": ["BTC"], "metric": ["balance"], "value": [1.0]})
+    async def fake_fetch_glassnode(symbol, metric, days):
+        return df
+    monkeypatch.setattr("app.ingestion_service.routes.fetch_glassnode", fake_fetch_glassnode)
+    response = client.post(
+        "/ingest/onchain/glassnode",
+        json={"source": "glassnode", "chain_id": 1, "symbol": "BTC", "metric": "balance", "days": 1}
+    )
+    assert response.status_code == 422
+    assert "Missing columns" in response.json()["detail"]
+
+# Schema validation error for Social
+def test_ingest_social_schema_validation_error(client, monkeypatch):
+    # Missing 'ts'
+    df = pd.DataFrame({"user": ["u"], "text": ["t"], "sentiment_score": [0.0]})
+    async def fake_twitter(query, since, until, max_results):
+        return df
+    monkeypatch.setattr("app.ingestion_service.routes.fetch_twitter_sentiment", fake_twitter)
+    response = client.post(
+        "/ingest/social/twitter",
+        json={
+            "platform": "twitter",
+            "query": "test",
+            "since": "2025-08-01T00:00:00Z",
+            "until": "2025-08-01T01:00:00Z",
+            "max_results": 1
+        }
+    )
+    assert response.status_code == 422
+    assert "Missing columns" in response.json()["detail"]
+
+# Schema validation error for News
+def test_ingest_news_schema_validation_error(client, monkeypatch):
+    # Missing 'published_at'
+    df = pd.DataFrame({"source_type": ["api"], "source_name": ["n"], "title": ["t"], "url": ["u"], "author": ["a"], "summary": ["s"]})
+    async def fake_fetch_news_api(category):
+        return df
+    monkeypatch.setattr("app.ingestion_service.routes.fetch_news_api", fake_fetch_news_api)
+    response = client.post("/ingest/news", json={"source_type": "api", "category": "crypto"})
+    assert response.status_code == 422
+    assert "Missing columns" in response.json()["detail"]
