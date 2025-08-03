@@ -13,13 +13,16 @@ async def _retry_async(func, *args, retries: int = 3, backoff_factor: float = 1.
         try:
             return await func(*args, **kwargs)
         except Exception as e:
-            logger.warning(f"CCXT call {func.__name__} failed on attempt {attempt}/{retries}: {e}")
+            try:
+                logger.warning(f"CCXT call {func.__name__} failed on attempt {attempt}/{retries}: {e}")
+            except Exception:
+                pass
             if attempt < retries:
                 await asyncio.sleep(backoff_factor * 2 ** (attempt - 1))
     # Last attempt
     return await func(*args, **kwargs)
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("app.adapters.ccxt_adapter")
 
 class CCXTAdapter:
     def __init__(self, exchange_id: str = "binance"):

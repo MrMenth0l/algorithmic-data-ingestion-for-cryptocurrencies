@@ -20,8 +20,8 @@ class FakeClient:
 
 # Adjust this import to your module path
 from app.adapters.news_adapter import (
-    fetch_crypto_news,
-    fetch_rss_feed,
+    fetch_news_api,
+    fetch_news_rss,
     NEWS_API_KEY,
 )
 
@@ -51,7 +51,7 @@ def fix_env(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fetch_crypto_news_success(monkeypatch):
+async def test_fetch_news_api_success(monkeypatch):
     # Prepare fake articles
     data = {
         "data": [
@@ -79,7 +79,7 @@ async def test_fetch_crypto_news_success(monkeypatch):
         lambda *args, **kwargs: FakeClient(fake_get)
     )
 
-    results = await fetch_crypto_news("general", limit=1)
+    results = await fetch_news_api("general", limit=1)
     assert len(results) == 1
     item = results[0]
     assert item["id"] == "abcd1234"  # last 10 chars of URL
@@ -93,7 +93,7 @@ async def test_fetch_crypto_news_success(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fetch_crypto_news_http_error(monkeypatch):
+async def test_fetch_news_api_http_error(monkeypatch):
     async def fake_get(url, params):
         return DummyResponse(500)
 
@@ -103,11 +103,11 @@ async def test_fetch_crypto_news_http_error(monkeypatch):
     )
 
     with pytest.raises(Exception):
-        await fetch_crypto_news("exchange", limit=5)
+        await fetch_news_api("exchange", limit=5)
 
 
 @pytest.mark.asyncio
-async def test_fetch_rss_feed(monkeypatch):
+async def test_fetch_news_rss(monkeypatch):
     # Fake RSS content
     xml = "<rss><channel><item><guid>1</guid><title>News 1</title><link>url1</link><description>Sum1</description><pubDate>Wed, 01 Aug 2025 12:00:00 GMT</pubDate></item></channel></rss>"
 
@@ -136,7 +136,7 @@ async def test_fetch_rss_feed(monkeypatch):
     monkeypatch.setattr("app.adapters.news_adapter.asyncio.sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt()))
 
     with pytest.raises(KeyboardInterrupt):
-        await fetch_rss_feed("http://fake.feed/", lambda item: updates.append(item), poll_interval=1)
+        await fetch_news_rss("http://fake.feed/", lambda item: updates.append(item), poll_interval=1)
 
     assert len(updates) == 1
     item = updates[0]
@@ -145,3 +145,116 @@ async def test_fetch_rss_feed(monkeypatch):
     assert item["url"] == "url1"
     assert item["summary"] == "Sum1"
     assert item["published_at"] == "Wed, 01 Aug 2025 12:00:00 GMT"
+
+
+# 1. Test retry logic in fetch_news_api
+@pytest.mark.asyncio
+async def test_fetch_news_api_retry(monkeypatch):
+    # Simulate HTTP failure on first attempt, then success
+    data = {"data": [{"news_url": "https://example.com/xyz", "title": "T", "source_name": "S", "author": "A", "text": "D", "date": "2025-08-02T00:00:00"}]}
+    call_count = {"n": 0}
+    async def fake_get(url, params):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise Exception("HTTP error")
+        return DummyResponse(200, json_data=data)
+    monkeypatch.setenv("NEWS_API_KEY", "test-token")
+    monkeypatch.setattr("app.adapters.news_adapter.httpx.AsyncClient", lambda *args, **kwargs: FakeClient(fake_get))
+    results = await fetch_news_api("general", limit=1)
+    assert len(results) == 1
+    assert call_count["n"] == 2
+
+
+# 2. Test JSON parse error handling in fetch_news_api
+@pytest.mark.asyncio
+async def test_fetch_news_api_parse_error(monkeypatch):
+    # DummyResponse.json raises
+    class BadResponse(DummyResponse):
+        def json(self):
+            raise ValueError("bad json")
+    async def fake_get(url, params):
+        return BadResponse(200)
+    # Track parse error counter
+    import app.adapters.news_adapter as mod
+    called = {"n": 0}
+    monkeypatch.setattr(mod, "NEWS_PARSE_ERRORS", SimpleNamespace(inc=lambda: called.__setitem__("n", called.get("n", 0)+1)))
+    monkeypatch.setattr("app.adapters.news_adapter.httpx.AsyncClient", lambda *args, **kwargs: FakeClient(fake_get))
+    results = await fetch_news_api("general", limit=1)
+    assert results == []
+    assert called["n"] == 1
+
+
+# 3. Test RSS parse error handling in fetch_news_rss
+@pytest.mark.asyncio
+async def test_fetch_news_rss_parse_error(monkeypatch):
+    # Simulate parse failure then KeyboardInterrupt
+    xml = "<bad</xml>"
+    async def fake_get(url):
+        return DummyResponse(200, text_data=xml)
+    # Monkeypatch parse to raise
+    import app.adapters.news_adapter as mod
+    called = {"n": 0}
+    monkeypatch.setattr(mod, "NEWS_PARSE_ERRORS", SimpleNamespace(inc=lambda: called.__setitem__("n", called.get("n", 0)+1)))
+    monkeypatch.setattr(feedparser, "parse", lambda content: (_ for _ in ()).throw(Exception("xml error")))
+    monkeypatch.setenv("RSS_POLL_INTERVAL", "1")
+    # Break out of loop after error
+    monkeypatch.setattr("app.adapters.news_adapter.asyncio.sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt()))
+    # Patch client
+    monkeypatch.setattr("app.adapters.news_adapter.httpx.AsyncClient", lambda *args, **kwargs: FakeClient(fake_get))
+    updates = []
+    with pytest.raises(KeyboardInterrupt):
+        await fetch_news_rss("http://fake", lambda x: updates.append(x))
+    assert called["n"] == 1
+    assert updates == []
+
+
+# 4. Test default poll interval
+def test_default_poll_interval(monkeypatch):
+    monkeypatch.delenv("RSS_POLL_INTERVAL", raising=False)
+    import importlib, os
+    import app.adapters.news_adapter as mod
+    importlib.reload(mod)
+    assert mod.DEFAULT_POLL_INTERVAL == 60
+    monkeypatch.setenv("RSS_POLL_INTERVAL", "5")
+    importlib.reload(mod)
+    assert mod.DEFAULT_POLL_INTERVAL == 5
+
+@pytest.mark.asyncio
+async def test_news_api_calls_metric(monkeypatch):
+    # Track NEWS_API_CALLS.inc calls
+    import app.adapters.news_adapter as mod
+    calls = {"n": 0}
+    monkeypatch.setattr(mod, "NEWS_API_CALLS", SimpleNamespace(inc=lambda: calls.__setitem__("n", calls.get("n", 0) + 1)))
+    # Fake HTTP client returning empty data
+    async def fake_get(url, params):
+        return DummyResponse(200, json_data={"data": []})
+    monkeypatch.setattr(
+        "app.adapters.news_adapter.httpx.AsyncClient",
+        lambda *args, **kwargs: FakeClient(fake_get)
+    )
+    results = await fetch_news_api("general", limit=1)
+    assert results == []
+    # Should have incremented once at function start
+    assert calls["n"] == 1
+
+@pytest.mark.asyncio
+async def test_news_rss_polls_metric(monkeypatch):
+    # Track NEWS_RSS_POLLS.inc calls
+    import app.adapters.news_adapter as mod
+    calls = {"n": 0}
+    monkeypatch.setenv("RSS_POLL_INTERVAL", "1")
+    monkeypatch.setattr(mod, "NEWS_RSS_POLLS", SimpleNamespace(inc=lambda: calls.__setitem__("n", calls.get("n", 0) + 1)))
+    # Fake RSS content and break after first iteration
+    xml = "<rss></rss>"
+    async def fake_get(url):
+        return DummyResponse(200, text_data=xml)
+    monkeypatch.setattr(
+        "app.adapters.news_adapter.httpx.AsyncClient",
+        lambda *args, **kwargs: FakeClient(fake_get)
+    )
+    # Break loop after first poll
+    monkeypatch.setattr("app.adapters.news_adapter.asyncio.sleep", lambda s: (_ for _ in ()).throw(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        await fetch_news_rss("http://fake", lambda x: None)
+    # Should have incremented once before parsing
+    assert calls["n"] == 1

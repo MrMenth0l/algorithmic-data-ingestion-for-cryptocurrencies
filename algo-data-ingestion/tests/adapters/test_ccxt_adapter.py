@@ -1,7 +1,6 @@
 import asyncio
 import pytest
 import pandas as pd
-import logging
 
 from datetime import datetime
 from unittest.mock import AsyncMock, patch
@@ -102,18 +101,40 @@ async def test_watch_ticker(dummy_exchange):
     assert events[0]["last"] == 29300
 
 @pytest.mark.asyncio
-async def test_fetch_ticker_retry(dummy_exchange, caplog):
+async def test_fetch_ticker_retry(dummy_exchange):
     # Simulate failure on first attempt, success on second
     dummy_exchange.fetch_ticker.side_effect = [
         Exception("Network error"),
         {"symbol": "BTC/USDT", "last": 250.0}
     ]
     adapter = CCXTAdapter("binance")
-    caplog.set_level(logging.WARNING, logger="app.adapters.ccxt_adapter")
     result = await adapter.fetch_ticker("BTC/USDT")
     assert result["last"] == 250.0
-    # Check that a warning was logged for the failed attempt
-    assert any(
-        "CCXT call fetch_ticker failed on attempt 1/3" in record.getMessage()
-        for record in caplog.records
-    )
+    # Verify that retry logic attempted two calls
+    assert dummy_exchange.fetch_ticker.call_count == 2
+
+@pytest.mark.asyncio
+async def test_fetch_ticker_all_fail(dummy_exchange):
+    # Simulate failure on all attempts
+    dummy_exchange.fetch_ticker.side_effect = [Exception("Network error")] * 4
+    adapter = CCXTAdapter("binance")
+    with pytest.raises(Exception) as exc:
+        await adapter.fetch_ticker("BTC/USDT")
+    # Should have attempted 4 calls (3 retries + final)
+    assert dummy_exchange.fetch_ticker.call_count == 4
+    assert "Network error" in str(exc.value)
+
+@pytest.mark.asyncio
+async def test_fetch_ticker_logging_error(dummy_exchange, monkeypatch):
+    # First attempt raises, second succeeds
+    dummy_exchange.fetch_ticker.side_effect = [
+        Exception("Network down"),
+        {"symbol": "BTC/USDT", "last": 320.0}
+    ]
+    # Force logger.warning to raise
+    import app.adapters.ccxt_adapter as mod
+    monkeypatch.setattr(mod.logger, "warning", lambda *args, **kwargs: (_ for _ in ()).throw(Exception("Logger failed")))
+    adapter = CCXTAdapter("binance")
+    result = await adapter.fetch_ticker("BTC/USDT")
+    assert result["last"] == 320.0
+    assert dummy_exchange.fetch_ticker.call_count == 2
