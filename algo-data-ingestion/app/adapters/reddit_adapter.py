@@ -1,3 +1,6 @@
+import logging
+import asyncio
+from prometheus_client import Counter, CollectorRegistry
 import os
 import httpx
 from typing import List, Dict, Any
@@ -5,21 +8,52 @@ from datetime import datetime
 import pandas as pd
 from typing import Literal
 
+# Metrics Registry and Counters
+_METRICS_REGISTRY = CollectorRegistry()
+REDDIT_API_CALLS = Counter('reddit_api_calls_total', 'Total Reddit API calls', registry=_METRICS_REGISTRY)
+PUSHSHIFT_CALLS = Counter('pushshift_calls_total', 'Total Pushshift API calls', registry=_METRICS_REGISTRY)
+REDDIT_PARSE_ERRORS = Counter('reddit_parse_errors_total', 'Total parse errors in Reddit adapter', registry=_METRICS_REGISTRY)
+logger = logging.getLogger(__name__)
+
+# Retry helper
+async def _retry_http(method, *args, retries: int = 3, backoff: float = 1.0, **kwargs):
+    for attempt in range(1, retries + 1):
+        try:
+            return await method(*args, **kwargs)
+        except Exception as e:
+            try:
+                logger.warning(f"{method.__name__} attempt {attempt}/{retries} failed: {e}")
+            except Exception:
+                pass
+            if attempt < retries:
+                await asyncio.sleep(backoff * 2 ** (attempt - 1))
+    return await method(*args, **kwargs)
+
 # Environment variables for Reddit OAuth
 REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID")
 REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET")
 REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "AlgoDataIngestion/0.1")
 
 async def fetch_reddit_api(subreddit: str, since: datetime, until: datetime, limit: int) -> pd.DataFrame:
+    # Parameter validation
+    if since >= until:
+        raise ValueError("`since` must be before `until`")
+    if not (1 <= limit <= 1000):
+        raise ValueError("`limit` must be between 1 and 1000")
+    REDDIT_API_CALLS.inc()
     # 1. Obtain access token via client credentials
     async with httpx.AsyncClient(auth=(REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET),
                                  headers={"User-Agent": REDDIT_USER_AGENT}) as client:
-        token_resp = await client.post(
-            "https://www.reddit.com/api/v1/access_token",
-            data={"grant_type": "client_credentials"}
-        )
+        token_resp = await _retry_http(client.post,
+                                       "https://www.reddit.com/api/v1/access_token",
+                                       data={"grant_type": "client_credentials"})
         token_resp.raise_for_status()
-        token = token_resp.json().get("access_token")
+        try:
+            token = token_resp.json().get("access_token")
+        except Exception as e:
+            REDDIT_PARSE_ERRORS.inc()
+            logger.error(f"Token JSON parse error: {e}")
+            return pd.DataFrame([])
 
     headers = {
         "Authorization": f"Bearer {token}",
@@ -29,9 +63,19 @@ async def fetch_reddit_api(subreddit: str, since: datetime, until: datetime, lim
     params = {"limit": limit}
 
     async with httpx.AsyncClient(headers=headers) as client:
-        resp = await client.get(url, params=params)
+        resp = await _retry_http(client.get, url, params=params)
         resp.raise_for_status()
-        posts = resp.json().get("data", {}).get("children", [])
+        try:
+            posts = resp.json().get("data", {}).get("children", [])
+        except Exception as e:
+            REDDIT_PARSE_ERRORS.inc()
+            logger.error(f"JSON parse error in fetch_reddit_api: {e}")
+            return pd.DataFrame([])
+
+        # Handle empty posts list as parse error
+        if not posts:
+            REDDIT_PARSE_ERRORS.inc()
+            return pd.DataFrame([])
 
     results: List[Dict[str, Any]] = []
     for item in posts:
@@ -53,6 +97,12 @@ async def fetch_reddit_api(subreddit: str, since: datetime, until: datetime, lim
     return df
 
 async def fetch_pushshift(subreddit: str, since: datetime, until: datetime, limit: int) -> pd.DataFrame:
+    # Parameter validation
+    if since >= until:
+        raise ValueError("`since` must be before `until`")
+    if not (1 <= limit <= 1000):
+        raise ValueError("`limit` must be between 1 and 1000")
+    PUSHSHIFT_CALLS.inc()
     url = "https://api.pushshift.io/reddit/search/submission"
     params = {
         "subreddit": subreddit,
@@ -61,9 +111,19 @@ async def fetch_pushshift(subreddit: str, since: datetime, until: datetime, limi
         "before": int(until.timestamp()),
     }
     async with httpx.AsyncClient() as client:
-        resp = await client.get(url, params=params)
+        resp = await _retry_http(client.get, url, params=params)
         resp.raise_for_status()
-        data = resp.json().get("data", [])
+        try:
+            data = resp.json().get("data", [])
+        except Exception as e:
+            REDDIT_PARSE_ERRORS.inc()
+            logger.error(f"JSON parse error in fetch_pushshift: {e}")
+            return pd.DataFrame([])
+
+        # Handle empty data list as parse error
+        if not data:
+            REDDIT_PARSE_ERRORS.inc()
+            return pd.DataFrame([])
 
     results: List[Dict[str, Any]] = []
     for post in data:
