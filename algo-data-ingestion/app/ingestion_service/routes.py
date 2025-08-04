@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException
+from app.ingestion_service.config import settings
 from .schemas import MarketIngestRequest, OnchainIngestRequest, SocialIngestRequest, NewsIngestRequest
 from app.adapters.ccxt_adapter import CCXTAdapter
 from app.adapters.onchain_adapter import fetch_glassnode, fetch_covalent
@@ -14,7 +15,7 @@ router = APIRouter()
 async def ingest_market(exchange: str, body: MarketIngestRequest):
     adapter = CCXTAdapter(exchange)
     df = await adapter.fetch_ohlcv(body.symbol, body.granularity)
-    base = "data_lake/market"
+    base = settings.MARKET_PATH
     partitions = {
         "exchange": exchange,
         "symbol": body.symbol,
@@ -40,7 +41,7 @@ async def ingest_onchain(source: str, body: OnchainIngestRequest):
     # Determine adapter based on source
     if source.lower() == "glassnode":
         df = await fetch_glassnode(body.symbol, body.metric, days=body.days)
-        base = "data_lake/onchain/glassnode"
+        base = settings.ONCHAIN_PATH + "/glassnode"
         partitions = {
             "symbol": body.symbol or "",
             "metric": body.metric or "",
@@ -50,7 +51,7 @@ async def ingest_onchain(source: str, body: OnchainIngestRequest):
         }
     elif source.lower() == "covalent":
         df = await fetch_covalent(chain_id=body.chain_id, address=body.address)
-        base = "data_lake/onchain/covalent"
+        base = settings.ONCHAIN_PATH + "/covalent"
         partitions = {
             "chain_id": body.chain_id,
             "address": body.address or "",
@@ -78,10 +79,10 @@ async def ingest_social(platform: str, body: SocialIngestRequest):
     platform_lower = platform.lower()
     if platform_lower == "twitter":
         df = await fetch_twitter_sentiment(body.query, body.since, body.until, body.max_results)
-        base = "data_lake/social/twitter"
+        base = settings.SOCIAL_PATH + "/twitter"
     elif platform_lower == "reddit":
         df = await fetch_reddit_api(body.query, body.since, body.until, body.max_results)
-        base = "data_lake/social/reddit"
+        base = settings.SOCIAL_PATH + "/reddit"
     else:
         raise HTTPException(status_code=400, detail=f"Unknown social platform: {platform}")
     partitions = {
@@ -107,10 +108,10 @@ async def ingest_social(platform: str, body: SocialIngestRequest):
 async def ingest_news(body: NewsIngestRequest):
     if body.source_type.lower() == "api":
         df = await fetch_news_api(category=body.category)
-        base = "data_lake/news/api"
+        base = settings.NEWS_PATH + "/api"
     elif body.source_type.lower() == "rss":
         df = await fetch_news_rss(body.feed_url)
-        base = "data_lake/news/rss"
+        base = settings.NEWS_PATH + "/rss"
     else:
         raise HTTPException(status_code=400, detail=f"Unknown news source_type: {body.source_type}")
     partitions = {
