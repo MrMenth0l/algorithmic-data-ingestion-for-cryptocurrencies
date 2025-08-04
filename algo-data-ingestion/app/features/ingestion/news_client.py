@@ -1,7 +1,7 @@
 
 
 import asyncio
-from app.adapters.news_adapter import fetch_crypto_news, fetch_rss_feed
+from app.adapters.news_adapter import fetch_news_api, fetch_news_rss
 import pandas as pd
 from datetime import datetime
 
@@ -29,7 +29,7 @@ class NewsClient:
         Returns a DataFrame with normalized columns (e.g., ts, title, url, summary, source).
         """
         return asyncio.get_event_loop().run_until_complete(
-            fetch_crypto_news(since, until, source, limit)
+            fetch_news_api(since, until, source, limit)
         )
 
     def stream_rss(
@@ -42,5 +42,5 @@ class NewsClient:
         """
         # Delegate to the async RSS feed streamer in the adapter
         asyncio.get_event_loop().run_until_complete(
-            fetch_rss_feed(feed_url, handle_update)
+            fetch_news_rss(feed_url, handle_update)
         )
