@@ -1,6 +1,8 @@
 import pytest
 from fastapi.testclient import TestClient
 from app.ingestion_service.main import app
+from pydantic_settings import BaseSettings
+from pydantic import Field
 
 client = TestClient(app)
 

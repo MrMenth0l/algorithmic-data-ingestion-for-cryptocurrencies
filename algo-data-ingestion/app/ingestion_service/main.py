@@ -4,12 +4,13 @@ from prometheus_client import make_asgi_app
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 from app.ingestion_service.utils import _METRICS_REGISTRY
+from app.ingestion_service.config import settings
 
 app = FastAPI(title="Raw Data Ingestion Service")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -35,4 +36,9 @@ async def on_shutdown():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(
+        app,
+        host=settings.ingest_host,
+        port=settings.ingest_port,
+        reload=True
+    )
