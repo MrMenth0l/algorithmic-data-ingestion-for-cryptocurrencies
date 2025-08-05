@@ -11,6 +11,7 @@ from typing import Optional
 from app.features.ingestion.ccxt_client import CCXTClient
 from app.features.ingestion.news_client import NewsClient
 from app.features.ingestion.onchain_client import OnchainClient
+from app.features.ingestion.social_client import SocialClient
 
 
 
@@ -178,6 +179,7 @@ def get_glassnode_data(
     return client.get_glassnode_metric(symbol=symbol, metric=metric, days=days)
 
 
+
 @router.get("/onchain/covalent")
 def get_covalent_balances(
     chain_id: int,
@@ -188,3 +190,30 @@ def get_covalent_balances(
     """
     client = OnchainClient()
     return client.get_covalent_balances(chain_id=chain_id, address=address)
+
+# SocialClient GET endpoints
+@router.get("/social/twitter")
+def get_twitter_data(
+    query: str,
+    since: Optional[int] = None,
+    until: Optional[int] = None,
+    limit: int = 100
+):
+    """
+    Fetch tweets via SocialClient.
+    """
+    client = SocialClient()
+    return client.fetch_tweets(query, since=since, until=until, limit=limit)
+
+@router.get("/social/reddit")
+def get_reddit_data(
+    subreddit: str,
+    since: Optional[int] = None,
+    until: Optional[int] = None,
+    limit: int = 100
+):
+    """
+    Fetch Reddit posts via SocialClient.
+    """
+    client = SocialClient()
+    return client.fetch_reddit_api(subreddit, since=since, until=until, limit=limit)
