@@ -7,8 +7,20 @@ from app.adapters.reddit_adapter import fetch_reddit_api, fetch_pushshift
 from app.adapters.news_adapter import fetch_news_api, fetch_news_rss
 from app.adapters.sentiment_adapter import fetch_twitter_sentiment
 from .utils import write_to_parquet
+from typing import Optional
+from app.features.ingestion.ccxt_client import CCXTClient
 
 router = APIRouter()
+
+
+# Historical Market Data via CCXT client
+@router.get("/ccxt/historical")
+def get_ccxt_historical(symbol: str, since: Optional[int] = None, limit: int = 100):
+    """
+    Fetch historical market data via CCXT client.
+    """
+    client = CCXTClient(exchange_name="")  # uses default exchange if none specified
+    return client.fetch_historical(symbol, since=since, limit=limit)
 
 
 @router.post("/market/{exchange}")

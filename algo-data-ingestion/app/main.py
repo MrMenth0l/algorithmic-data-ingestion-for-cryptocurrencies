@@ -1,6 +1,8 @@
 from dotenv import load_dotenv
 load_dotenv()
 from fastapi import FastAPI, HTTPException, Query
+from app.features.ingestion.ccxt_client import CCXTClient
+from typing import Optional
 from .adapters.ccxt_adapter import get_ticker_raw
 from .models import Envelope, TickerData, SentimentEnvelope, SentimentItem
 from .storage import persist_raw
