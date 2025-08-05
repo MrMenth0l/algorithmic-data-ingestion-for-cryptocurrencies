@@ -9,6 +9,10 @@ from app.adapters.sentiment_adapter import fetch_twitter_sentiment
 from .utils import write_to_parquet
 from typing import Optional
 from app.features.ingestion.ccxt_client import CCXTClient
+from app.features.ingestion.news_client import NewsClient
+from app.features.ingestion.onchain_client import OnchainClient
+
+
 
 router = APIRouter()
 
@@ -145,7 +149,6 @@ async def ingest_news(body: NewsIngestRequest):
 
 
 # Legacy synchronous News fetch via NewsClient
-from app.features.ingestion.news_client import NewsClient
 
 @router.get("/news")
 def get_news_articles(
@@ -159,3 +162,29 @@ def get_news_articles(
     """
     client = NewsClient()
     return client.get_crypto_news(since=since, until=until, source=source, limit=limit)
+
+
+# OnchainClient GET endpoints
+@router.get("/onchain/glassnode")
+def get_glassnode_data(
+    symbol: str,
+    metric: str,
+    days: int = 1
+):
+    """
+    Fetch Glassnode metric data via OnchainClient.
+    """
+    client = OnchainClient()
+    return client.get_glassnode_metric(symbol=symbol, metric=metric, days=days)
+
+
+@router.get("/onchain/covalent")
+def get_covalent_balances(
+    chain_id: int,
+    address: str
+):
+    """
+    Fetch Covalent token balances via OnchainClient.
+    """
+    client = OnchainClient()
+    return client.get_covalent_balances(chain_id=chain_id, address=address)
