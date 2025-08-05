@@ -142,3 +142,20 @@ async def ingest_news(body: NewsIngestRequest):
     if path is None:
         return {"status": "no_data", "path": None}
     return {"status": "ok", "path": str(path)}
+
+
+# Legacy synchronous News fetch via NewsClient
+from app.features.ingestion.news_client import NewsClient
+
+@router.get("/news")
+def get_news_articles(
+    source: str,
+    since: Optional[int] = None,
+    until: Optional[int] = None,
+    limit: int = 100
+):
+    """
+    Fetch news articles via NewsClient.
+    """
+    client = NewsClient()
+    return client.get_crypto_news(since=since, until=until, source=source, limit=limit)
