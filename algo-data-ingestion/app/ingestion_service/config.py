@@ -13,6 +13,12 @@ class Settings(BaseSettings):
     glassnode_api_key: str | None = Field(None, env="GLASSNODE_API_KEY")
     covalent_api_key: str | None = Field(None, env="COVALENT_API_KEY")
 
+    # Data lake paths
+    MARKET_PATH: str = Field("data_lake/market", env="MARKET_PATH")
+    ONCHAIN_PATH: str = Field("data_lake/onchain", env="ONCHAIN_PATH")
+    SOCIAL_PATH: str = Field("data_lake/social", env="SOCIAL_PATH")
+    NEWS_PATH: str = Field("data_lake/news", env="NEWS_PATH")
+
     # Redis Feature Store settings
     redis_host: str = Field("localhost", env="REDIS_HOST")
     redis_port: int = Field(6379, env="REDIS_PORT")

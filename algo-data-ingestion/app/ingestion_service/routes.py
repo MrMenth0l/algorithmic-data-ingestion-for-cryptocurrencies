@@ -30,20 +30,34 @@ _redis = redis.Redis(
 )
 
 
-# Historical Market Data via CCXT client
-@router.get("/ccxt/historical")
-def get_ccxt_historical(symbol: str, since: Optional[int] = None, limit: int = 100):
+
+# Historical Market Data via CCXT client for a specific exchange
+@router.get("/ccxt/{exchange}/historical")
+def get_ccxt_historical(
+    exchange: str,
+    symbol: str,
+    limit: int = 100
+):
     """
-    Fetch historical market data via CCXT client.
+    Fetch historical market data via CCXT client for a specific exchange.
     """
-    client = CCXTClient(exchange_name="")  # uses default exchange if none specified
-    return client.fetch_historical(symbol, since=since, limit=limit)
+    client = CCXTClient(exchange_name=exchange)
+    return client.fetch_historical(symbol=symbol, limit=limit)
 
 
 @router.post("/market/{exchange}")
 async def ingest_market(exchange: str, body: MarketIngestRequest):
     adapter = CCXTAdapter(exchange)
-    df = await adapter.fetch_ohlcv(body.symbol, body.granularity)
+    df = await adapter.fetch_ohlcv(
+        body.symbol,
+        body.granularity,
+        since=None,
+        limit=body.limit
+    )
+    # Ensure partition columns exist for parquet write
+    if not df.empty:
+        df['symbol'] = body.symbol
+        df['exchange'] = exchange
     base = settings.MARKET_PATH
     partitions = {
         "exchange": exchange,
@@ -52,6 +66,11 @@ async def ingest_market(exchange: str, body: MarketIngestRequest):
         "month": df["timestamp"].dt.month.iloc[0] if not df.empty and "timestamp" in df.columns else None,
         "day": df["timestamp"].dt.day.iloc[0] if not df.empty and "timestamp" in df.columns else None,
     }
+    if not df.empty:
+        df['symbol'] = body.symbol
+        df['exchange'] = exchange
+        # Localize timestamp to UTC for Parquet schema compliance
+        df['timestamp'] = df['timestamp'].dt.tz_localize('UTC')
     try:
         path = write_to_parquet(df, base, partitions)
     except ValueError as ve:

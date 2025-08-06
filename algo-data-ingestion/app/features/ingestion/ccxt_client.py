@@ -40,10 +40,13 @@ class CCXTClient:
         Fetch historical OHLCV bars for a symbol.
         Returns a DataFrame with columns [timestamp, open, high, low, close, volume].
         """
+        # Default to 1m interval if none provided
+        if timeframe is None:
+            timeframe = "1m"
         # If no adapter (e.g., in tests), skip actual fetch
         if self.adapter is None:
             return []
-        return asyncio.get_event_loop().run_until_complete(
+        return asyncio.run(
             self.adapter.fetch_ohlcv(symbol, timeframe, since, limit)
         )
 

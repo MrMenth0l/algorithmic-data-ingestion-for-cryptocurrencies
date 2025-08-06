@@ -1,10 +1,11 @@
 from pydantic import BaseModel, Field
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict
 
 class MarketIngestRequest(BaseModel):
     symbol: str
     granularity: str
+    limit: int = 100
 
 class OnchainIngestRequest(BaseModel):
     source: str

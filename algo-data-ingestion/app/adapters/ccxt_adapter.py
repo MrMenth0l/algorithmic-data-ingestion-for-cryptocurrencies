@@ -2,7 +2,7 @@
 
 import ccxt.async_support as ccxt
 import asyncio
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import pandas as pd
 from datetime import datetime
 import logging
@@ -45,15 +45,18 @@ class CCXTAdapter:
         self,
         symbol: str,
         timeframe: str,
-        since: datetime,
+        since: Optional[datetime] = None,
         limit: int = None
     ) -> pd.DataFrame:
         """
         Fetch OHLCV bars for a symbol.
         Returns a DataFrame with columns [timestamp, open, high, low, close, volume].
         """
-        since_ms = int(since.timestamp() * 1000)
-        ohlcv = await _retry_async(self.client.fetch_ohlcv, symbol, timeframe, since_ms, limit)
+        if since is not None:
+            since_ms = int(since.timestamp() * 1000)
+            ohlcv = await _retry_async(self.client.fetch_ohlcv, symbol, timeframe, since_ms, limit)
+        else:
+            ohlcv = await _retry_async(self.client.fetch_ohlcv, symbol, timeframe, None, limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         return df
