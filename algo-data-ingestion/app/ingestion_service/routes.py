@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException
+import redis
 from app.ingestion_service.config import settings
 from .schemas import MarketIngestRequest, OnchainIngestRequest, SocialIngestRequest, NewsIngestRequest
 from app.adapters.ccxt_adapter import CCXTAdapter
@@ -16,6 +17,15 @@ from app.features.ingestion.social_client import SocialClient
 
 
 router = APIRouter()
+
+# Redis client for feature store health checks
+_redis = redis.Redis(
+    host=settings.redis_host,
+    port=settings.redis_port,
+    db=settings.redis_db,
+    password=settings.redis_password or None,
+    decode_responses=True
+)
 
 
 # Historical Market Data via CCXT client
@@ -217,3 +227,17 @@ def get_reddit_data(
     """
     client = SocialClient()
     return client.fetch_reddit_api(subreddit, since=since, until=until, limit=limit)
+
+
+# Redis health-check endpoint
+@router.get("/health/redis")
+def redis_health_check():
+    """
+    Check connectivity to Redis.
+    """
+    try:
+        if _redis.ping():
+            return {"redis": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    raise HTTPException(status_code=503, detail="Redis ping failed")

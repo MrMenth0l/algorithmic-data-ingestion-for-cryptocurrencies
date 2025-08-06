@@ -13,6 +13,15 @@ class Settings(BaseSettings):
     glassnode_api_key: str | None = Field(None, env="GLASSNODE_API_KEY")
     covalent_api_key: str | None = Field(None, env="COVALENT_API_KEY")
 
+    # Redis Feature Store settings
+    redis_host: str = Field("localhost", env="REDIS_HOST")
+    redis_port: int = Field(6379, env="REDIS_PORT")
+    redis_db: int = Field(0, env="REDIS_DB")
+    redis_password: str | None = Field(None, env="REDIS_PASSWORD")
+
+    # Feature Store TTL (in seconds)
+    feature_ttl_seconds: int = Field(60, env="FEATURE_TTL_SECONDS")
+
     market_path: str = Field("data_lake/market", env="MARKET_PATH")
     onchain_path: str = Field("data_lake/onchain", env="ONCHAIN_PATH")
     social_path: str = Field("data_lake/social", env="SOCIAL_PATH")
