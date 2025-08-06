@@ -25,3 +25,8 @@ class NewsIngestRequest(BaseModel):
     source_type: str  # "api" or "rss"
     feed_url: Optional[str] = None
     category: Optional[str] = None
+
+class FeatureVector(BaseModel):
+    symbol: str
+    timestamp: int
+    features: Dict[str, float]

@@ -2,6 +2,8 @@ from fastapi import APIRouter, HTTPException
 import redis
 from app.ingestion_service.config import settings
 from .schemas import MarketIngestRequest, OnchainIngestRequest, SocialIngestRequest, NewsIngestRequest
+from .schemas import FeatureVector
+from fastapi import Body, Query
 from app.adapters.ccxt_adapter import CCXTAdapter
 from app.adapters.onchain_adapter import fetch_glassnode, fetch_covalent
 from app.adapters.reddit_adapter import fetch_reddit_api, fetch_pushshift
@@ -241,3 +243,31 @@ def redis_health_check():
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
     raise HTTPException(status_code=503, detail="Redis ping failed")
+
+
+# Feature store write endpoint
+@router.post("/features/write")
+def write_features(vec: FeatureVector = Body(...)):
+    """
+    Write a feature vector to Redis with TTL.
+    """
+    key = f"features:{vec.symbol}:{vec.timestamp}"
+    payload = vec.json()
+    _redis.set(key, payload, ex=settings.feature_ttl_seconds)
+    return {"status": "ok", "key": key}
+
+# Feature store read endpoint
+@router.get("/features/read")
+def read_features(
+    symbol: str = Query(...),
+    timestamp: int = Query(...)
+):
+    """
+    Read a feature vector from Redis.
+    """
+    key = f"features:{symbol}:{timestamp}"
+    raw = _redis.get(key)
+    if not raw:
+        raise HTTPException(status_code=404, detail="Feature vector not found")
+    vec = FeatureVector.parse_raw(raw)
+    return vec
