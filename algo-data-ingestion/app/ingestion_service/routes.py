@@ -133,6 +133,20 @@ async def ingest_social(platform: str, body: SocialIngestRequest):
         base = settings.SOCIAL_PATH + "/reddit"
     else:
         raise HTTPException(status_code=400, detail=f"Unknown social platform: {platform}")
+    # Normalize columns for social data
+    if not df.empty:
+        # Source platform
+        df['source'] = platform_lower
+        # User and text fields
+        if 'author' in df.columns:
+            df['user'] = df['author']
+        if 'content' in df.columns:
+            df['text'] = df['content']
+        elif 'selftext' in df.columns:
+            df['text'] = df['selftext']
+        # Sentiment score default (if missing)
+        if 'sentiment_score' not in df.columns:
+            df['sentiment_score'] = None
     partitions = {
         "query": body.query.replace(" ", "_"),
         "year": df["ts"].dt.year.iloc[0] if not df.empty and "ts" in df.columns else None,

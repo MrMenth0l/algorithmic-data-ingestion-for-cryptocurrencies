@@ -16,7 +16,6 @@ class OnchainIngestRequest(BaseModel):
     days: int = Field(default=1, ge=1)
 
 class SocialIngestRequest(BaseModel):
-    platform: str
     query: str
     since: datetime
     until: datetime

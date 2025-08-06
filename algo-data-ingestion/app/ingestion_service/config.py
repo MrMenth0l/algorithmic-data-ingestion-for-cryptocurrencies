@@ -1,6 +1,7 @@
 from pydantic_settings import BaseSettings
 from pydantic import Field
-
+from dotenv import load_dotenv
+load_dotenv()  # this will read your .env into os.environ
 class Settings(BaseSettings):
     twitter_api_key: str | None = Field(None, env="TWITTER_API_KEY")
     twitter_api_secret: str | None = Field(None, env="TWITTER_API_SECRET")
