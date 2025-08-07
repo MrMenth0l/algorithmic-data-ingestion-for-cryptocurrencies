@@ -1,6 +1,12 @@
 import pandas as pd
 from typing import Optional
 from app.features.processors.ta_indicators import compute_batch_indicators
+from prometheus_client import Histogram
+
+CHUNK_PROCESSING_TIME = Histogram(
+    "feature_chunk_processing_seconds",
+    "Time to process each TA data chunk"
+)
 
 class StatefulTAProcessor:
     """
@@ -14,6 +20,7 @@ class StatefulTAProcessor:
         # Buffer for carry-over rows: DataFrame of high, low, close
         self._carry: Optional[pd.DataFrame] = None
 
+    @CHUNK_PROCESSING_TIME.time()
     def process_chunk(self, chunk: pd.DataFrame) -> pd.DataFrame:
         """
         Process a single chunk of raw data (with columns high, low, close).
