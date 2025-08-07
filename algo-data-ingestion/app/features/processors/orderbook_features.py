@@ -1,5 +1,16 @@
 import pandas as pd
 import numpy as np
+from numba import njit
+
+# Numba-accelerated imbalance kernel
+@njit
+def _imbalance_nb(bid_array: np.ndarray, ask_array: np.ndarray) -> np.ndarray:
+    n = bid_array.shape[0]
+    out = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        total = bid_array[i] + ask_array[i]
+        out[i] = (bid_array[i] - ask_array[i]) / total if total != 0 else 0.0
+    return out
 
 
 def compute_orderbook_imbalance(snapshot: pd.DataFrame) -> float:
@@ -80,9 +91,11 @@ def compute_imbalance_series(orderbook_df: pd.DataFrame) -> pd.Series:
         pivot['ask'] = 0
     bid_vol = pivot['bid']
     ask_vol = pivot['ask']
-    total = bid_vol + ask_vol
-    imbalance = (bid_vol - ask_vol) / total.replace(0, np.nan)
-    return imbalance.fillna(0)
+    # Use Numba-accelerated kernel for imbalance
+    bid_array = bid_vol.values.astype(np.float64)
+    ask_array = ask_vol.values.astype(np.float64)
+    imbalance_array = _imbalance_nb(bid_array, ask_array)
+    return pd.Series(imbalance_array, index=pivot.index)
 
 
 def compute_spread_series(orderbook_df: pd.DataFrame) -> pd.Series:
