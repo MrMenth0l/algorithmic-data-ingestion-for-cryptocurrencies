@@ -3,6 +3,7 @@ import pandas as pd
 import pytest
 
 from app.features.processors.orderbook_features import compute_imbalance_series
+from app.features.processors.orderbook_features import compute_batch_orderbook
 
 @pytest.fixture
 def large_orderbook_df():
@@ -31,3 +32,12 @@ def test_imbalance_speed(benchmark, large_orderbook_df):
     # Benchmark the Numba-accelerated imbalance
     result = benchmark(compute_imbalance_series, large_orderbook_df)
     # Optionally, assert minimum performance (e.g. < 0.1s)
+
+
+def test_batch_orderbook_speed(benchmark, large_orderbook_df):
+    """
+    Benchmark the fused imbalance+spread batch processor.
+    """
+    result = benchmark(compute_batch_orderbook, large_orderbook_df)
+    assert isinstance(result, pd.DataFrame)
+    assert set(["imbalance", "spread"]).issubset(result.columns)

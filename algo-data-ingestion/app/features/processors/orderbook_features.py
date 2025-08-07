@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from numba import njit
 
+
 # Numba-accelerated imbalance kernel
 @njit
 def _imbalance_nb(bid_array: np.ndarray, ask_array: np.ndarray) -> np.ndarray:
@@ -11,6 +12,25 @@ def _imbalance_nb(bid_array: np.ndarray, ask_array: np.ndarray) -> np.ndarray:
         total = bid_array[i] + ask_array[i]
         out[i] = (bid_array[i] - ask_array[i]) / total if total != 0 else 0.0
     return out
+
+
+# Numba-accelerated batch orderbook kernel
+@njit
+def _batch_orderbook_nb(
+    bid_vol: np.ndarray,
+    ask_vol: np.ndarray,
+    bid_price: np.ndarray,
+    ask_price: np.ndarray
+) -> np.ndarray:
+    n = bid_vol.shape[0]
+    imbalance = np.empty(n, dtype=np.float64)
+    spread = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        total = bid_vol[i] + ask_vol[i]
+        imbalance[i] = (bid_vol[i] - ask_vol[i]) / total if total != 0 else 0.0
+        spread[i] = ask_price[i] - bid_price[i]
+    # Stack to shape (n, 2)
+    return np.vstack((imbalance, spread)).T
 
 
 def compute_orderbook_imbalance(snapshot: pd.DataFrame) -> float:
@@ -136,3 +156,31 @@ def compute_depth_series(orderbook_df: pd.DataFrame, n_levels: int = 5) -> pd.Da
     depth_series.index = depth_series.index.droplevel(1)  # drop inner index
     return depth_series
 
+
+
+
+# Batch computation of orderbook features (imbalance and spread)
+def compute_batch_orderbook(orderbook_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute batch orderbook features (imbalance and spread) in one pass.
+    Returns a DataFrame with columns 'imbalance' and 'spread', indexed by 'ts'.
+    """
+    # Pivot to per-timestamp bid/ask volumes and prices
+    pivot_vol = orderbook_df.pivot_table(
+        index='ts', columns='side', values='amount', aggfunc='sum', fill_value=0
+    )
+    pivot_price = orderbook_df.pivot_table(
+        index='ts', columns='side', values='price', aggfunc='first'
+    ).fillna(method='ffill')
+    # Ensure both columns exist
+    for col in ('bid', 'ask'):
+        if col not in pivot_vol.columns:
+            pivot_vol[col] = 0
+        if col not in pivot_price.columns:
+            pivot_price[col] = pivot_price[col].ffill().fillna(0)
+    bid_vol = pivot_vol['bid'].values.astype(np.float64)
+    ask_vol = pivot_vol['ask'].values.astype(np.float64)
+    bid_price = pivot_price['bid'].values.astype(np.float64)
+    ask_price = pivot_price['ask'].values.astype(np.float64)
+    batch = _batch_orderbook_nb(bid_vol, ask_vol, bid_price, ask_price)
+    return pd.DataFrame(batch, columns=['imbalance', 'spread'], index=pivot_vol.index)

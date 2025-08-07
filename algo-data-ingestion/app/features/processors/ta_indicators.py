@@ -25,6 +25,37 @@ def _cci_nb(high: np.ndarray, low: np.ndarray, close: np.ndarray, window: int, c
             out[i] = (tp_current - ma) / (constant * md) if md != 0 else 0.0
     return out
 
+# Batch kernel for CCI and ROC using Numba
+@njit
+def _batch_indicators_nb(high: np.ndarray, low: np.ndarray, close: np.ndarray, window: int, constant: float) -> np.ndarray:
+    n = high.shape[0]
+    cci_out = np.empty(n, dtype=np.float64)
+    roc_out = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        # CCI
+        if i < window - 1:
+            cci_out[i] = np.nan
+        else:
+            tp_sum = 0.0
+            for j in range(i - window + 1, i + 1):
+                tp_sum += (high[j] + low[j] + close[j]) / 3.0
+            ma = tp_sum / window
+            md_sum = 0.0
+            for j in range(i - window + 1, i + 1):
+                tp = (high[j] + low[j] + close[j]) / 3.0
+                md_sum += abs(tp - ma)
+            md = md_sum / window
+            tp_current = (high[i] + low[i] + close[i]) / 3.0
+            cci_out[i] = (tp_current - ma) / (constant * md) if md != 0 else 0.0
+        # ROC
+        if i < window:
+            roc_out[i] = np.nan
+        else:
+            roc_out[i] = 100.0 * ((close[i] - close[i - window]) / close[i - window])
+    # Combine outputs: stack cci then roc
+    result = np.vstack((cci_out, roc_out)).T
+    return result
+
 def compute_rsi(prices: pd.Series, window: int = 14) -> pd.Series:
     """
     Compute the Relative Strength Index (RSI) for a given price series.
@@ -179,4 +210,19 @@ def compute_roc(prices: pd.Series, window: int = 12) -> pd.Series:
     Compute Rate of Change (ROC).
     """
     return 100 * (prices.diff(window) / prices.shift(window))
+
+
+# Batch compute CCI and ROC in one Numba pass
+def compute_batch_indicators(df: pd.DataFrame, window: int = 20, constant: float = 0.015) -> pd.DataFrame:
+    """
+    Compute batch indicators (CCI and ROC) in one pass using Numba.
+    Returns a DataFrame with columns 'cci' and 'roc'.
+    """
+    high_arr = df['high'].values.astype(np.float64)
+    low_arr = df['low'].values.astype(np.float64)
+    close_arr = df['close'].values.astype(np.float64)
+    batch = _batch_indicators_nb(high_arr, low_arr, close_arr, window, constant)
+    cci_series = pd.Series(batch[:, 0], index=df.index)
+    roc_series = pd.Series(batch[:, 1], index=df.index)
+    return pd.DataFrame({'cci': cci_series, 'roc': roc_series})
 

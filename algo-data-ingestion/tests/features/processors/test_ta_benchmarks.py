@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from app.features.processors.ta_indicators import compute_cci
+from app.features.processors.ta_indicators import compute_cci, compute_batch_indicators
 from app.features.processors.orderbook_features import compute_imbalance_series
 
 @pytest.fixture(scope="module")
@@ -41,3 +41,11 @@ def test_imbalance_speed(benchmark, large_df):
     # Benchmark imbalance for order-book
     result = benchmark(compute_imbalance_series, ob_df)
     assert isinstance(result, pd.Series)
+
+
+def test_batch_indicators_speed(benchmark, large_df):
+    df, _ = large_df
+    # Benchmark the fused CCI+ROC batch processor
+    result = benchmark(compute_batch_indicators, df, 20, 0.015)
+    assert isinstance(result, pd.DataFrame)
+    assert set(["cci", "roc"]).issubset(result.columns)
