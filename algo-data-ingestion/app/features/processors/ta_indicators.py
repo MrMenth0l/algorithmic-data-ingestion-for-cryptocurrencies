@@ -1,6 +1,29 @@
 import pandas as pd
 import numpy as np
 from numba import jit
+from numba import njit
+@njit
+def _cci_nb(high: np.ndarray, low: np.ndarray, close: np.ndarray, window: int, constant: float) -> np.ndarray:
+    n = high.shape[0]
+    out = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        if i < window - 1:
+            out[i] = np.nan
+        else:
+            # Compute typical prices for the window
+            tp_sum = 0.0
+            for j in range(i - window + 1, i + 1):
+                tp_sum += (high[j] + low[j] + close[j]) / 3.0
+            ma = tp_sum / window
+            # Mean deviation
+            md_sum = 0.0
+            for j in range(i - window + 1, i + 1):
+                tp = (high[j] + low[j] + close[j]) / 3.0
+                md_sum += abs(tp - ma)
+            md = md_sum / window
+            tp_current = (high[i] + low[i] + close[i]) / 3.0
+            out[i] = (tp_current - ma) / (constant * md) if md != 0 else 0.0
+    return out
 
 def compute_rsi(prices: pd.Series, window: int = 14) -> pd.Series:
     """
@@ -45,20 +68,21 @@ def compute_bollinger(prices: pd.Series, window: int = 20, num_std: float = 2.0)
         'lower': lower_band
     })
 
-def compute_vwap(df: pd.DataFrame, price_col: str = 'close', volume_col: str = 'volume') -> pd.Series:
+def compute_vwap(df: pd.DataFrame, window: int, price_col: str = 'close', volume_col: str = 'volume') -> pd.Series:
     """
-    Compute the Volume Weighted Average Price (VWAP) for a given DataFrame.
+    Compute the rolling Volume Weighted Average Price (VWAP) for a given DataFrame.
 
     Parameters:
     df (pd.DataFrame): DataFrame containing price and volume columns.
+    window (int): The rolling window size.
     price_col (str): Name of the price column (default 'close').
     volume_col (str): Name of the volume column (default 'volume').
 
     Returns:
-    pd.Series: VWAP values.
+    pd.Series: Rolling VWAP values.
     """
     pv = df[price_col] * df[volume_col]
-    vwap = pv.cumsum() / df[volume_col].cumsum()
+    vwap = pv.rolling(window).sum() / df[volume_col].rolling(window).sum()
     return vwap
 
 
@@ -100,12 +124,13 @@ def compute_obv(df: pd.DataFrame, price_col: str = 'close', volume_col: str = 'v
 
 def compute_cci(df: pd.DataFrame, window: int = 20, constant: float = 0.015) -> pd.Series:
     """
-    Compute Commodity Channel Index (CCI).
+    Compute Commodity Channel Index (CCI) using a Numba-optimized kernel.
     """
-    tp = (df['high'] + df['low'] + df['close']) / 3
-    ma = tp.rolling(window).mean()
-    md = tp.rolling(window).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True)
-    return (tp - ma) / (constant * md)
+    high_arr = df['high'].values.astype(np.float64)
+    low_arr = df['low'].values.astype(np.float64)
+    close_arr = df['close'].values.astype(np.float64)
+    out = _cci_nb(high_arr, low_arr, close_arr, window, constant)
+    return pd.Series(out, index=df.index)
 
 def compute_stochastic(df: pd.DataFrame, k_window: int = 14, d_window: int = 3) -> pd.DataFrame:
     """
