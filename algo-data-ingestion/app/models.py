@@ -1,3 +1,5 @@
+#Legacy file, not in actual implementation.
+
 from pydantic import BaseModel
 from typing import Any, Dict, List, Optional, Literal
 from datetime import datetime

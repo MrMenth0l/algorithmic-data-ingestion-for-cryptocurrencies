@@ -1,3 +1,5 @@
+#Legacy file, not in actual implementation.
+
 from dotenv import load_dotenv
 load_dotenv()
 from fastapi import FastAPI, HTTPException, Query
