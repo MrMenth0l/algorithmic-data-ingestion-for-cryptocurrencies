@@ -20,6 +20,9 @@ __pycache__/
 .idea/
 .vscode/
 
+#parquet files
+data_lake/
+
 # macOS / Windows system files
 .DS_Store
 Thumbs.db
