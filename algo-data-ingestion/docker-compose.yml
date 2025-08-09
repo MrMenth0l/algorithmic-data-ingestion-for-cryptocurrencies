@@ -1,6 +1,71 @@
-version: "3.8"
+
 services:
   redis:
     image: redis:7
+    command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  ingestion-api:
+    build:
+      context: .
+    # If you publish a built image later, you can replace the above with:
+    # image: algo-data-ingestion:latest
+    env_file:
+      - .env
+    environment:
+      # Ensure the app talks to the compose Redis service
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      # Mount only the data lake for persistence; code is baked via Dockerfile build
+      - ./data_lake:/app/data_lake
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: >
+      uvicorn app.ingestion_service.main:app
+      --host 0.0.0.0
+      --port 8000
+      --workers 2
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring:/etc/prometheus:ro
+    depends_on:
+      ingestion-api:
+        condition: service_started
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - ./monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      prometheus:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  redis-data: {}

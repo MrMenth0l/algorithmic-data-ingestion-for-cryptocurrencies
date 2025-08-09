@@ -1,0 +1,41 @@
+{
+  "title": "Ingestion Overview",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Parquet Writes /s",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "rate(parquet_writes_total[5m])", "legendFormat": "writes/s" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Parquet Write Errors /s",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
+      "targets": [
+        { "expr": "rate(parquet_write_errors_total[5m])", "legendFormat": "errors/s" }
+      ]
+    },
+    {
+      "type": "graph",
+      "title": "Parquet Write Latency p95",
+      "gridPos": { "h": 10, "w": 16, "x": 0, "y": 6 },
+      "lines": true,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(parquet_write_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95"
+        }
+      ],
+      "yaxes": [
+        { "format": "s" },
+        { "format": "short" }
+      ]
+    }
+  ]
+}

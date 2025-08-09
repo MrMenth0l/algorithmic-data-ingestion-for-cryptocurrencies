@@ -19,7 +19,7 @@ def test_historical_endpoint_success(monkeypatch):
         "app.features.ingestion.ccxt_client.CCXTClient.fetch_historical",
         lambda self, symbol, since=None, limit=1: dummy
     )
-    response = client.get("/ingest/ccxt/historical", params={"symbol": "BTC/USDT", "limit": 1})
+    response = client.get("/ingest/ccxt/binance/historical", params={"symbol": "BTC/USDT", "limit": 1})
     assert response.status_code == 200
     assert response.json() == dummy
 
