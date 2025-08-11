@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect
+from datetime import datetime, timezone
 import redis
 from app.ingestion_service.config import settings
 from .schemas import MarketIngestRequest, OnchainIngestRequest, SocialIngestRequest, NewsIngestRequest
@@ -13,6 +14,7 @@ from .utils import write_to_parquet
 from typing import Optional
 from app.features.ingestion.ccxt_client import CCXTClient
 from app.features.ingestion.news_client import NewsClient
+from app.ingestion_service.main import get_news
 from app.features.ingestion.onchain_client import OnchainClient
 from app.features.ingestion.social_client import SocialClient
 
@@ -26,14 +28,15 @@ _redis = redis.Redis(
     port=settings.redis_port,
     db=settings.redis_db,
     password=settings.redis_password or None,
-    decode_responses=True
+    decode_responses=True,
 )
+
 
 
 
 # Historical Market Data via CCXT client for a specific exchange
 @router.get("/ccxt/{exchange}/historical")
-def get_ccxt_historical(
+async def get_ccxt_historical(
     exchange: str,
     symbol: str,
     limit: int = 100
@@ -42,7 +45,10 @@ def get_ccxt_historical(
     Fetch historical market data via CCXT client for a specific exchange.
     """
     client = CCXTClient(exchange_name=exchange)
-    return client.fetch_historical(symbol=symbol, limit=limit)
+    try:
+        return await client.fetch_historical(symbol=symbol, limit=limit)
+    finally:
+        await client.aclose()
 
 
 @router.post("/market/{exchange}")
@@ -165,6 +171,11 @@ async def ingest_social(platform: str, body: SocialIngestRequest):
     return {"status": "ok", "path": str(path)}
 
 
+def _parse_epoch_sec(ts: Optional[int]) -> Optional[datetime]:
+    if ts is None:
+        return None
+    return datetime.fromtimestamp(ts, tz=timezone.utc)
+
 # News Ingestion Endpoint
 @router.post("/news")
 async def ingest_news(body: NewsIngestRequest):
@@ -194,74 +205,142 @@ async def ingest_news(body: NewsIngestRequest):
     return {"status": "ok", "path": str(path)}
 
 
-# Legacy synchronous News fetch via NewsClient
-
-@router.get("/news")
-def get_news_articles(
+# News search (async) via NewsClient
+@router.get("/news/search")
+async def get_news_articles(
     source: str,
     since: Optional[int] = None,
     until: Optional[int] = None,
-    limit: int = 100
+    limit: int = 100,
+    news: NewsClient = Depends(get_news),
 ):
     """
-    Fetch news articles via NewsClient.
+    Fetch news articles via NewsClient (one-shot search). Returns records JSON.
+    - `since`/`until` are epoch seconds (UTC).
+    - `source` selects provider/channel handled by the adapter layer.
     """
-    client = NewsClient()
-    return client.get_crypto_news(since=since, until=until, source=source, limit=limit)
+    df = await news.get_crypto_news(
+        since=_parse_epoch_sec(since),
+        until=_parse_epoch_sec(until),
+        source=source,
+        limit=limit,
+    )
+    return {"rows": 0 if df is None else len(df),
+            "data": [] if df is None else df.to_dict(orient="records")}
+
+# Optional: WebSocket stream of RSS items via NewsClient
+@router.websocket("/ws/news/rss")
+async def ws_news_rss(websocket: WebSocket, feed_url: str):
+    """
+    Live-stream RSS items to clients over WebSocket.
+    Sends each item as JSON as it arrives.
+    """
+    await websocket.accept()
+    news = NewsClient()  # local instance because DI isn't used in WS context
+    try:
+        async def _on_item(item: dict):
+            await websocket.send_json(item)
+        await news.stream_rss(feed_url, handle_update=_on_item)
+    except WebSocketDisconnect:
+        # client disconnected
+        pass
+    except Exception as e:
+        try:
+            await websocket.send_json({"error": str(e)})
+        finally:
+            await websocket.close()
+    finally:
+        await news.aclose()
 
 
 # OnchainClient GET endpoints
 @router.get("/onchain/glassnode")
-def get_glassnode_data(
+async def get_glassnode_data(
     symbol: str,
     metric: str,
     days: int = 1
 ):
     """
-    Fetch Glassnode metric data via OnchainClient.
+    Fetch Glassnode metric data via OnchainClient (async) and return JSON.
     """
     client = OnchainClient()
-    return client.get_glassnode_metric(symbol=symbol, metric=metric, days=days)
+    try:
+        df = await client.get_glassnode_metric(symbol=symbol, metric=metric, days=days)
+        rows = 0 if df is None else len(df)
+        data = [] if df is None or df.empty else df.to_dict(orient="records")
+        return {"rows": rows, "data": data}
+    finally:
+        await client.aclose()
 
 
 
 @router.get("/onchain/covalent")
-def get_covalent_balances(
+async def get_covalent_balances(
     chain_id: int,
     address: str
 ):
     """
-    Fetch Covalent token balances via OnchainClient.
+    Fetch Covalent token balances via OnchainClient (async) and return JSON.
     """
     client = OnchainClient()
-    return client.get_covalent_balances(chain_id=chain_id, address=address)
+    try:
+        df = await client.get_covalent_balances(chain_id=chain_id, address=address)
+        rows = 0 if df is None else len(df)
+        data = [] if df is None or df.empty else df.to_dict(orient="records")
+        return {"rows": rows, "data": data}
+    finally:
+        await client.aclose()
 
 # SocialClient GET endpoints
 @router.get("/social/twitter")
-def get_twitter_data(
+async def get_twitter_data(
     query: str,
     since: Optional[int] = None,
     until: Optional[int] = None,
     limit: int = 100
 ):
     """
-    Fetch tweets via SocialClient.
+    Fetch tweets via SocialClient (async) and return JSON.
+    since/until are epoch seconds (UTC).
     """
     client = SocialClient()
-    return client.fetch_tweets(query, since=since, until=until, limit=limit)
+    try:
+        df = await client.fetch_tweets(
+            query,
+            since=_parse_epoch_sec(since) if since is not None else None,
+            until=_parse_epoch_sec(until) if until is not None else None,
+            limit=limit,
+        )
+        rows = 0 if df is None else len(df)
+        data = [] if df is None or df.empty else df.to_dict(orient="records")
+        return {"rows": rows, "data": data}
+    finally:
+        await client.aclose()
 
 @router.get("/social/reddit")
-def get_reddit_data(
+async def get_reddit_data(
     subreddit: str,
     since: Optional[int] = None,
     until: Optional[int] = None,
     limit: int = 100
 ):
     """
-    Fetch Reddit posts via SocialClient.
+    Fetch Reddit posts via SocialClient (async) and return JSON.
+    since/until are epoch seconds (UTC).
     """
     client = SocialClient()
-    return client.fetch_reddit_api(subreddit, since=since, until=until, limit=limit)
+    try:
+        df = await client.fetch_reddit_api(
+            subreddit,
+            since=_parse_epoch_sec(since) if since is not None else None,
+            until=_parse_epoch_sec(until) if until is not None else None,
+            limit=limit,
+        )
+        rows = 0 if df is None else len(df)
+        data = [] if df is None or df.empty else df.to_dict(orient="records")
+        return {"rows": rows, "data": data}
+    finally:
+        await client.aclose()
 
 
 # Redis health-check endpoint

@@ -1,125 +1,114 @@
-import pandas as pd
-import asyncio
-from app.adapters.ccxt_adapter import CCXTAdapter
+from __future__ import annotations
+from typing import Optional, Callable, List, Dict, Any
 from datetime import datetime
+import inspect
+import pandas as pd
 from tenacity import retry, stop_after_attempt, wait_exponential
-from ratelimit import limits, sleep_and_retry
 
-# Rate limiting: max 5 calls per second
+from app.adapters.ccxt_adapter import CCXTAdapter
+
+# Keeping these constants for tests that reference them, but
+# we no longer use blocking decorators in async code.
 RATE_LIMIT_CALLS = 5
-RATE_LIMIT_PERIOD = 1  # in seconds
+RATE_LIMIT_PERIOD = 1  # seconds
+
 
 class CCXTClient:
     """
-    Wrapper around CCXT for fetching historical OHLCV, orderbook snapshots,
-    and streaming live data via WebSocket.
+    Async wrapper around CCXTAdapter for fetching historical OHLCV,
+    order book snapshots, and streaming live data.
     """
+
     # Expose rate-limit constants at class level for testing
     RATE_LIMIT_CALLS = RATE_LIMIT_CALLS
     RATE_LIMIT_PERIOD = RATE_LIMIT_PERIOD
-    def __init__(self, exchange_name: str = None, api_key: str = None, secret: str = None):
+
+    def __init__(self, exchange_name: Optional[str] = None, api_key: Optional[str] = None, secret: Optional[str] = None):
         """
         Initialize the CCXTClient by wrapping the CCXTAdapter.
+        Note: adapter creds handled internally if supported; we keep signature for future.
         """
         if exchange_name:
+            # Preserve existing adapter construction to avoid signature drift
             self.adapter = CCXTAdapter(exchange_name)
         else:
             self.adapter = None
 
+    async def aclose(self) -> None:
+        """Attempt to gracefully close underlying adapter resources."""
+        if not self.adapter:
+            return
+        # Support either async aclose() or close() (sync/async)
+        close = getattr(self.adapter, "aclose", None) or getattr(self.adapter, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.iscoroutine(result):
+                await result
 
-    @limits(calls=RATE_LIMIT_CALLS, period=RATE_LIMIT_PERIOD)
+    # -----------------
+    # Async API methods
+    # -----------------
+
     @retry(reraise=True, stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=1, max=10))
-    def fetch_historical(
+    async def fetch_historical(
         self,
         symbol: str,
-        since: datetime = None,
-        limit: int = None,
-        timeframe: str = None
+        since: Optional[datetime] = None,
+        limit: Optional[int] = None,
+        timeframe: Optional[str] = None,
     ) -> pd.DataFrame:
         """
         Fetch historical OHLCV bars for a symbol.
         Returns a DataFrame with columns [timestamp, open, high, low, close, volume].
         """
-        # Default to 1m interval if none provided
         if timeframe is None:
             timeframe = "1m"
-        # If no adapter (e.g., in tests), skip actual fetch
         if self.adapter is None:
-            return []
-        return asyncio.run(
-            self.adapter.fetch_ohlcv(symbol, timeframe, since, limit)
-        )
+            return pd.DataFrame()
+        return await self.adapter.fetch_ohlcv(symbol, timeframe, since, limit)
 
-    @sleep_and_retry
-    @limits(calls=RATE_LIMIT_CALLS, period=RATE_LIMIT_PERIOD)
     @retry(reraise=True, stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=1, max=10))
-    def fetch_orderbook(
-        self,
-        symbol: str,
-        limit: int = 100
-    ) -> pd.DataFrame:
+    async def fetch_orderbook(self, symbol: str, limit: int = 100) -> pd.DataFrame:
         """
         Fetch current order book snapshot for a symbol.
         Returns a DataFrame with bids and asks.
         """
-        return asyncio.get_event_loop().run_until_complete(
-            self.adapter.fetch_order_book(symbol, limit)
-        )
+        if self.adapter is None:
+            return pd.DataFrame()
+        return await self.adapter.fetch_order_book(symbol, limit)
 
-    async def _watch_ticker(self, symbol: str, handle_update):
-        """
-        Internal: uses CCXT async WebSocket to watch ticker updates.
-        """
+    async def _watch_ticker(self, symbol: str, handle_update: Callable[[Dict[str, Any]], None]):
+        """Internal: uses adapter to watch ticker updates."""
+        if self.adapter is None:
+            return
         await self.adapter.watch_ticker(symbol, handle_update)
 
-    @sleep_and_retry
-    @limits(calls=RATE_LIMIT_CALLS, period=RATE_LIMIT_PERIOD)
     @retry(reraise=True, stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=1, max=10))
-    def stream_ticker(
-        self,
-        symbol: str,
-        handle_update: callable
-    ):
+    async def stream_ticker(self, symbol: str, handle_update: Callable[[Dict[str, Any]], None]):
         """
-        Stream live ticker updates via WebSocket.
-        handle_update will be called with each update dict.
+        Stream live ticker updates via WebSocket. Calls handle_update per item.
         """
-        asyncio.get_event_loop().run_until_complete(
-            self.adapter.watch_ticker(symbol, handle_update)
-        )
+        if self.adapter is None:
+            return
+        await self.adapter.watch_ticker(symbol, handle_update)
 
-    @sleep_and_retry
-    @limits(calls=RATE_LIMIT_CALLS, period=RATE_LIMIT_PERIOD)
     @retry(reraise=True, stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=1, max=10))
-    def list_symbols(self) -> list:
-        """
-        Return list of symbols available on the exchange.
-        """
-        return asyncio.get_event_loop().run_until_complete(
-            self.adapter.list_symbols()
-        )
+    async def list_symbols(self) -> List[str]:
+        """Return list of symbols available on the exchange."""
+        if self.adapter is None:
+            return []
+        return await self.adapter.list_symbols()
 
-    @sleep_and_retry
-    @limits(calls=RATE_LIMIT_CALLS, period=RATE_LIMIT_PERIOD)
     @retry(reraise=True, stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=1, max=10))
-    def get_ticker(
-        self,
-        symbol: str
-    ) -> dict:
-        """
-        Fetch a one-off ticker snapshot via REST.
-        """
-        return asyncio.get_event_loop().run_until_complete(
-            self.adapter.fetch_ticker(symbol)
-        )
+    async def get_ticker(self, symbol: str) -> Dict[str, Any]:
+        """Fetch a one-off ticker snapshot via REST."""
+        if self.adapter is None:
+            return {}
+        return await self.adapter.fetch_ticker(symbol)
 
-    @sleep_and_retry
-    @limits(calls=RATE_LIMIT_CALLS, period=RATE_LIMIT_PERIOD)
     @retry(reraise=True, stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=1, max=10))
-    def fetch_balance(self) -> dict:
-        """
-        Fetch account balances (if API keys provided).
-        """
-        return asyncio.get_event_loop().run_until_complete(
-            self.adapter.fetch_balance()
-        )
+    async def fetch_balance(self) -> Dict[str, Any]:
+        """Fetch account balances (if API keys provided)."""
+        if self.adapter is None:
+            return {}
+        return await self.adapter.fetch_balance()
