@@ -7,6 +7,7 @@ from typing import List, Dict, Any
 from datetime import datetime
 import pandas as pd
 from typing import Literal
+from app.common.time_norm import standardize_time_column, add_dt_partition, coerce_schema
 
 # Metrics Registry and Counters
 _METRICS_REGISTRY = CollectorRegistry()
@@ -53,7 +54,19 @@ async def fetch_reddit_api(subreddit: str, since: datetime, until: datetime, lim
         except Exception as e:
             REDDIT_PARSE_ERRORS.inc()
             logger.error(f"Token JSON parse error: {e}")
-            return pd.DataFrame([])
+            # Return schema-stable empty frame
+            empty = coerce_schema(pd.DataFrame(), {
+                "ts": "datetime64[ns, UTC]",
+                "author": "string",
+                "title": "string",
+                "selftext": "string",
+                "score": "Int64",
+                "num_comments": "Int64",
+                "id": "string",
+                "subreddit": "string",
+            })
+            add_dt_partition(empty, ts_col="ts")
+            return empty
 
     headers = {
         "Authorization": f"Bearer {token}",
@@ -70,30 +83,50 @@ async def fetch_reddit_api(subreddit: str, since: datetime, until: datetime, lim
         except Exception as e:
             REDDIT_PARSE_ERRORS.inc()
             logger.error(f"JSON parse error in fetch_reddit_api: {e}")
-            return pd.DataFrame([])
+            empty = coerce_schema(pd.DataFrame(), {
+                "ts": "datetime64[ns, UTC]",
+                "author": "string",
+                "title": "string",
+                "selftext": "string",
+                "score": "Int64",
+                "num_comments": "Int64",
+                "id": "string",
+                "subreddit": "string",
+            })
+            add_dt_partition(empty, ts_col="ts")
+            return empty
 
-        # Handle empty posts list as parse error
-        if not posts:
-            REDDIT_PARSE_ERRORS.inc()
-            return pd.DataFrame([])
-
-    results: List[Dict[str, Any]] = []
+    # Build normalized rows
+    rows: List[Dict[str, Any]] = []
     for item in posts:
         data = item.get("data", {})
-        results.append({
-            "id": data.get("id", ""),
+        created = data.get("created_utc")  # seconds epoch
+        rows.append({
+            "ts": pd.to_datetime(created, unit="s", utc=True),
+            "author": data.get("author", ""),
             "title": data.get("title", ""),
             "selftext": data.get("selftext", ""),
-            "author": data.get("author", ""),
-            "created_utc": datetime.utcfromtimestamp(data.get("created_utc", 0)),
+            "score": data.get("score"),
+            "num_comments": data.get("num_comments"),
+            "id": data.get("id", ""),
+            "subreddit": subreddit,
         })
-    df = pd.DataFrame([{
-        "ts": pd.to_datetime(item["created_utc"], utc=True),
-        "author": item["author"],
-        "title": item["title"],
-        "selftext": item["selftext"],
-        "id": item["id"]
-    } for item in results])
+
+    df = pd.DataFrame(rows)
+    # Ensure time column normalized and schema coerced
+    df = standardize_time_column(df, candidates=["ts", "created_utc", "created"], dest="ts")
+    schema = {
+        "ts": "datetime64[ns, UTC]",
+        "author": "string",
+        "title": "string",
+        "selftext": "string",
+        "score": "Int64",
+        "num_comments": "Int64",
+        "id": "string",
+        "subreddit": "string",
+    }
+    df = coerce_schema(df, schema)
+    add_dt_partition(df, ts_col="ts")
     return df
 
 async def fetch_pushshift(subreddit: str, since: datetime, until: datetime, limit: int) -> pd.DataFrame:
@@ -118,29 +151,48 @@ async def fetch_pushshift(subreddit: str, since: datetime, until: datetime, limi
         except Exception as e:
             REDDIT_PARSE_ERRORS.inc()
             logger.error(f"JSON parse error in fetch_pushshift: {e}")
-            return pd.DataFrame([])
+            empty = coerce_schema(pd.DataFrame(), {
+                "ts": "datetime64[ns, UTC]",
+                "author": "string",
+                "title": "string",
+                "selftext": "string",
+                "score": "Int64",
+                "num_comments": "Int64",
+                "id": "string",
+                "subreddit": "string",
+            })
+            add_dt_partition(empty, ts_col="ts")
+            return empty
 
-        # Handle empty data list as parse error
-        if not data:
-            REDDIT_PARSE_ERRORS.inc()
-            return pd.DataFrame([])
-
-    results: List[Dict[str, Any]] = []
+    # Build normalized rows
+    rows: List[Dict[str, Any]] = []
     for post in data:
-        results.append({
-            "id": post.get("id", ""),
+        created = post.get("created_utc")  # seconds epoch
+        rows.append({
+            "ts": pd.to_datetime(created, unit="s", utc=True),
+            "author": post.get("author", ""),
             "title": post.get("title", ""),
             "selftext": post.get("selftext", ""),
-            "author": post.get("author", ""),
-            "created_utc": datetime.utcfromtimestamp(post.get("created_utc", 0)),
+            "score": post.get("score"),
+            "num_comments": post.get("num_comments"),
+            "id": post.get("id", ""),
+            "subreddit": subreddit,
         })
-    df = pd.DataFrame([{
-        "ts": pd.to_datetime(post["created_utc"], utc=True),
-        "author": post["author"],
-        "title": post["title"],
-        "selftext": post["selftext"],
-        "id": post["id"]
-    } for post in results])
+
+    df = pd.DataFrame(rows)
+    df = standardize_time_column(df, candidates=["ts", "created_utc", "created"], dest="ts")
+    schema = {
+        "ts": "datetime64[ns, UTC]",
+        "author": "string",
+        "title": "string",
+        "selftext": "string",
+        "score": "Int64",
+        "num_comments": "Int64",
+        "id": "string",
+        "subreddit": "string",
+    }
+    df = coerce_schema(df, schema)
+    add_dt_partition(df, ts_col="ts")
     return df
 
 async def fetch_reddit(

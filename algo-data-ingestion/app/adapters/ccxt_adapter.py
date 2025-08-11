@@ -6,6 +6,7 @@ from typing import Dict, Any, Optional
 import pandas as pd
 from datetime import datetime
 import logging
+from app.common.time_norm import to_utc_dt, add_dt_partition, coerce_schema
 
 
 async def _retry_async(func, *args, retries: int = 3, backoff_factor: float = 1.0, **kwargs):
@@ -26,6 +27,7 @@ logger = logging.getLogger("app.adapters.ccxt_adapter")
 
 class CCXTAdapter:
     def __init__(self, exchange_id: str = "binance"):
+        self.exchange_id = exchange_id
         exchange_cls = getattr(ccxt, exchange_id)
         self.client = exchange_cls({
             "enableRateLimit": True,
@@ -57,8 +59,29 @@ class CCXTAdapter:
             ohlcv = await _retry_async(self.client.fetch_ohlcv, symbol, timeframe, since_ms, limit)
         else:
             ohlcv = await _retry_async(self.client.fetch_ohlcv, symbol, timeframe, None, limit)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df = pd.DataFrame(ohlcv, columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume'
+        ])
+        # Make timestamp tz-aware UTC, add identifying columns
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+        df['symbol'] = symbol
+        df['exchange'] = self.exchange_id
+        df['timeframe'] = timeframe
+
+        # Enforce schema and add dt partition
+        schema = {
+            'timestamp': 'datetime64[ns, UTC]',
+            'open': 'float64',
+            'high': 'float64',
+            'low': 'float64',
+            'close': 'float64',
+            'volume': 'float64',
+            'symbol': 'string',
+            'exchange': 'string',
+            'timeframe': 'string',
+        }
+        df = coerce_schema(df, schema)
+        add_dt_partition(df, ts_col='timestamp')
         return df
 
     async def fetch_order_book(
@@ -75,7 +98,27 @@ class CCXTAdapter:
         bids['side'] = 'bid'
         asks = pd.DataFrame(ob['asks'], columns=['price', 'amount'])
         asks['side'] = 'ask'
-        return pd.concat([bids, asks], ignore_index=True)
+        # Stamp snapshot time and identifiers, normalize schema
+        now_utc = pd.Timestamp.utcnow().tz_localize('UTC')
+        bids['timestamp'] = now_utc
+        asks['timestamp'] = now_utc
+        bids['symbol'] = symbol
+        asks['symbol'] = symbol
+        bids['exchange'] = self.exchange_id
+        asks['exchange'] = self.exchange_id
+
+        df = pd.concat([bids, asks], ignore_index=True)
+        schema = {
+            'timestamp': 'datetime64[ns, UTC]',
+            'price': 'float64',
+            'amount': 'float64',
+            'side': 'string',
+            'symbol': 'string',
+            'exchange': 'string',
+        }
+        df = coerce_schema(df, schema)
+        add_dt_partition(df, ts_col='timestamp')
+        return df
 
     async def watch_ticker(
         self,

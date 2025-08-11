@@ -5,6 +5,7 @@ import pandas as pd
 import logging
 from prometheus_client import Counter, CollectorRegistry
 import asyncio
+from app.common.time_norm import standardize_time_column, add_dt_partition, coerce_schema
 
 GLASSNODE_KEY = os.getenv("GLASSNODE_API_KEY")
 COVALENT_KEY  = os.getenv("COVALENT_API_KEY")
@@ -49,19 +50,47 @@ async def fetch_glassnode(symbol: str, metric: str, days: int = 1) -> pd.DataFra
         except Exception as e:
             ONCHAIN_PARSE_ERRORS.inc()
             logger.error(f"JSON parse error in fetch_glassnode: {e}")
-            return pd.DataFrame([])
+            empty = coerce_schema(pd.DataFrame(), {
+                "source": "string",
+                "symbol": "string",
+                "metric": "string",
+                "timestamp": "datetime64[ns, UTC]",
+                "value": "float64",
+            })
+            add_dt_partition(empty, ts_col="timestamp")
+            return empty
         # Return empty DataFrame on no or invalid data
         if not data or not isinstance(data, list):
             ONCHAIN_PARSE_ERRORS.inc()
-            return pd.DataFrame([])
-    df = pd.DataFrame([{
+            empty = coerce_schema(pd.DataFrame(), {
+                "source": "string",
+                "symbol": "string",
+                "metric": "string",
+                "timestamp": "datetime64[ns, UTC]",
+                "value": "float64",
+            })
+            add_dt_partition(empty, ts_col="timestamp")
+            return empty
+    rows = [{
         "source": "glassnode",
         "symbol": symbol,
         "metric": metric,
         "timestamp": point[0],
-        "value": point[1]
-    } for point in data])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+        "value": point[1],
+    } for point in data]
+    df = pd.DataFrame(rows)
+
+    # Normalize timestamp to tz-aware UTC and enforce schema
+    df = standardize_time_column(df, candidates=["timestamp", "ts"], dest="timestamp", unit="ms")
+    schema = {
+        "source": "string",
+        "symbol": "string",
+        "metric": "string",
+        "timestamp": "datetime64[ns, UTC]",
+        "value": "float64",
+    }
+    df = coerce_schema(df, schema)
+    add_dt_partition(df, ts_col="timestamp")
     return df
 
 async def fetch_covalent(chain_id: int, address: str) -> pd.DataFrame:
@@ -79,20 +108,56 @@ async def fetch_covalent(chain_id: int, address: str) -> pd.DataFrame:
         except Exception as e:
             ONCHAIN_PARSE_ERRORS.inc()
             logger.error(f"JSON parse error in fetch_covalent: {e}")
-            return pd.DataFrame([])
+            empty = coerce_schema(pd.DataFrame(), {
+                "source": "string",
+                "symbol": "string",
+                "metric": "string",
+                "timestamp": "datetime64[ns, UTC]",
+                "value": "float64",
+                "contract_address": "string",
+                "contract_name": "string",
+            })
+            add_dt_partition(empty, ts_col="timestamp")
+            return empty
         # Return empty DataFrame on no or invalid items
         if not items or not isinstance(items, list):
             ONCHAIN_PARSE_ERRORS.inc()
-            return pd.DataFrame([])
-    results = []
+            empty = coerce_schema(pd.DataFrame(), {
+                "source": "string",
+                "symbol": "string",
+                "metric": "string",
+                "timestamp": "datetime64[ns, UTC]",
+                "value": "float64",
+                "contract_address": "string",
+                "contract_name": "string",
+            })
+            add_dt_partition(empty, ts_col="timestamp")
+            return empty
+    rows = []
+    now_ms = int(datetime.utcnow().timestamp() * 1000)
     for token in items:
-        results.append({
+        rows.append({
             "source": "covalent",
-            "symbol": token["contract_ticker_symbol"],
+            "symbol": token.get("contract_ticker_symbol", ""),
             "metric": "balance",
-            "timestamp": int(datetime.utcnow().timestamp()*1000),
-            "value": float(token["balance"]) / (10**token["contract_decimals"])
+            "timestamp": now_ms,
+            "value": (float(token.get("balance", 0)) / (10 ** (token.get("contract_decimals") or 0))) if token.get("contract_decimals") is not None else None,
+            "contract_address": token.get("contract_address", ""),
+            "contract_name": token.get("contract_name", ""),
         })
-    df = pd.DataFrame(results)
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+    df = pd.DataFrame(rows)
+
+    # Normalize timestamp to tz-aware UTC and enforce schema (extras preserved)
+    df = standardize_time_column(df, candidates=["timestamp", "ts"], dest="timestamp", unit="ms")
+    schema = {
+        "source": "string",
+        "symbol": "string",
+        "metric": "string",
+        "timestamp": "datetime64[ns, UTC]",
+        "value": "float64",
+        "contract_address": "string",
+        "contract_name": "string",
+    }
+    df = coerce_schema(df, schema)
+    add_dt_partition(df, ts_col="timestamp")
     return df

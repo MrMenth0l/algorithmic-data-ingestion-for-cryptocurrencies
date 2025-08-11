@@ -1,12 +1,13 @@
 import os
 import tweepy
 import pandas as pd
-from typing import Literal
+from typing import Literal, Optional, List, Dict, Any
 from datetime import datetime
 import logging
 import asyncio
 from prometheus_client import Counter, CollectorRegistry
 from transformers import pipeline
+from app.common.time_norm import standardize_time_column, add_dt_partition, coerce_schema
 
 _METRICS_REGISTRY = CollectorRegistry()
 TWITTER_CALLS = Counter('twitter_calls_total', 'Total Twitter API calls', registry=_METRICS_REGISTRY)
@@ -49,61 +50,98 @@ async def _retry_http(method, *args, retries: int = 3, backoff: float = 1.0, **k
         return await result
     return result
 
+
+def _schema() -> Dict[str, str]:
+    return {
+        "ts": "datetime64[ns, UTC]",
+        "author": "string",
+        "text": "string",
+        "likes": "Int64",
+        "retweets": "Int64",
+        "sentiment_score": "float64",
+        "id": "string",
+        "source": "string",
+    }
+
+
+def _empty_df() -> pd.DataFrame:
+    df = coerce_schema(pd.DataFrame(), _schema())
+    add_dt_partition(df, ts_col="ts")
+    return df
+
+
 async def fetch_twitter_sentiment(
     query: str,
     since: datetime,
     until: datetime,
     max_results: int = 10
 ) -> pd.DataFrame:
+    """
+    Fetch recent tweets and attach sentiment scores.
+    Returns a normalized DataFrame with UTC timestamps and stable schema.
+    """
     # Parameter validation
     if since > until:
-        raise ValueError("since must be before until")
-    # If no time window, return empty DataFrame without error
+        logger.warning("since must be before until")
+        return _empty_df()
     if since == until:
-        return pd.DataFrame([], columns=["ts", "user", "text", "sentiment_score"])
-    TWITTER_CALLS.inc()
+        return _empty_df()
     if not (1 <= max_results <= 100):
-        raise ValueError("max_results must be between 1 and 100")
+        logger.warning("max_results must be between 1 and 100")
+        return _empty_df()
+
+    TWITTER_CALLS.inc()
+
+    # Ensure UTC ISO-8601 for the API
+    def _to_utc_iso(dt: datetime) -> str:
+        ts = pd.Timestamp(dt)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        else:
+            ts = ts.tz_convert("UTC")
+        return ts.isoformat()
+
     try:
-        tweets = await _retry_http(CLIENT.search_recent_tweets,
+        tweets = await _retry_http(
+            CLIENT.search_recent_tweets,
             query,
             max_results=max_results,
-            tweet_fields=["created_at","author_id"],
-            start_time=since.isoformat(),
-            end_time=until.isoformat()
+            tweet_fields=["created_at", "author_id", "public_metrics"],
+            start_time=_to_utc_iso(since),
+            end_time=_to_utc_iso(until),
         )
     except Exception as e:
         logger.error(f"Twitter fetch error: {e}")
         TWITTER_PARSE_ERRORS.inc()
-        return pd.DataFrame([], columns=["ts", "user", "text", "sentiment_score"])
-    results = []
+        return _empty_df()
+
+    if not getattr(tweets, "data", None):
+        return _empty_df()
+
+    rows: List[Dict[str, Any]] = []
     for t in tweets.data:
         try:
-            score = sentiment_analyzer(t.text)[0]['score']
+            score = sentiment_analyzer(t.text)[0]["score"]
         except Exception as e:
             logger.error(f"Sentiment analysis error: {e}")
             TWITTER_PARSE_ERRORS.inc()
             score = 0.0
-        results.append({
+        metrics = getattr(t, "public_metrics", None) or {}
+        likes = metrics.get("like_count") if isinstance(metrics, dict) else None
+        retweets = metrics.get("retweet_count") if isinstance(metrics, dict) else None
+        rows.append({
+            "ts": pd.to_datetime(getattr(t, "created_at", None), utc=True, errors="coerce"),
+            "author": str(getattr(t, "author_id", "")),
+            "text": getattr(t, "text", ""),
+            "likes": likes,
+            "retweets": retweets,
+            "sentiment_score": float(score) if score is not None else None,
+            "id": str(getattr(t, "id", "")),
             "source": "twitter",
-            "id": t.id,
-            "text": t.text,
-            "user": str(t.author_id),
-            "created_at": t.created_at,
-            "sentiment_score": score,
         })
 
-    # Build DataFrame with required columns
-    records = []
-    for item in results:
-        records.append({
-            "ts": pd.to_datetime(item["created_at"], utc=True),
-            "user": item["user"],
-            "text": item["text"],
-            "sentiment_score": item["sentiment_score"],
-        })
-    if records:
-        df = pd.DataFrame(records)
-    else:
-        df = pd.DataFrame([], columns=["ts", "user", "text", "sentiment_score"])
+    df = pd.DataFrame(rows)
+    df = standardize_time_column(df, candidates=["ts", "created_at"], dest="ts")
+    df = coerce_schema(df, _schema())
+    add_dt_partition(df, ts_col="ts")
     return df

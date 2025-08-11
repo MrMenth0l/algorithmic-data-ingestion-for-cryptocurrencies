@@ -4,9 +4,11 @@ import asyncio
 import httpx
 import feedparser
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from datetime import datetime
+import pandas as pd
 from prometheus_client import Counter, CollectorRegistry
+from app.common.time_norm import standardize_time_column, add_dt_partition, coerce_schema, to_utc_dt
 
 _METRICS_REGISTRY = CollectorRegistry()
 
@@ -35,37 +37,103 @@ async def _retry_http(method, *args, retries: int = 3, backoff_factor: float = 1
 
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 
-async def fetch_news_api(query: str, limit: int) -> List[Dict[str, Any]]:
+async def fetch_news_api(*args, **kwargs) -> pd.DataFrame:
+    """
+    Fetch crypto news via REST and return a normalized DataFrame.
+
+    Supports two call styles for backward compatibility:
+      - fetch_news_api(query: str, limit: int)
+      - fetch_news_api(since: datetime|None, until: datetime|None, source: str, limit: int)
+    """
     NEWS_API_CALLS.inc()
+
+    # Parse arguments
+    query: Optional[str] = None
+    since: Optional[datetime] = kwargs.get("since")
+    until: Optional[datetime] = kwargs.get("until")
+    source: Optional[str] = kwargs.get("source")
+    limit: Optional[int] = kwargs.get("limit")
+
+    # Legacy positional signature: (query: str, limit: int)
+    if len(args) >= 1 and isinstance(args[0], str) and (source is None):
+        query = args[0]
+        if limit is None and len(args) >= 2 and isinstance(args[1], int):
+            limit = args[1]
+
+    section = (query or source or "general")
+    if limit is None:
+        limit = 100
+
     url = "https://cryptonews-api.com/api/v1/category"
     params = {
-        "section": query,
+        "section": section,
         "items": limit,
         "token": NEWS_API_KEY,
     }
+
     async with httpx.AsyncClient() as client:
         resp = await _retry_http(client.get, url, params=params)
         resp.raise_for_status()
         try:
-            data = resp.json().get("data", [])
+            raw = resp.json().get("data", [])
         except Exception as e:
             NEWS_PARSE_ERRORS.inc()
             logger.error(f"JSON parse error in fetch_news_api: {e}")
-            return []
-    results: List[Dict[str, Any]] = []
-    for art in data:
+            # Return schema-stable empty frame
+            empty_schema = {
+                "id": "string",
+                "title": "string",
+                "url": "string",
+                "source": "string",
+                "author": "string",
+                "description": "string",
+                "published_at": "datetime64[ns, UTC]",
+            }
+            return coerce_schema(pd.DataFrame(), empty_schema)
+
+    rows: List[Dict[str, Any]] = []
+    for art in raw:
         news_url = art.get("news_url", "")
-        id = news_url.rstrip("/").split("/")[-1]
-        results.append({
-            "id": id,
+        art_id = news_url.rstrip("/").split("/")[-1] if news_url else None
+        published_raw = art.get("date")
+        # Convert published time to UTC
+        try:
+            published = pd.to_datetime(published_raw, utc=True)
+        except Exception:
+            published = pd.NaT
+        rows.append({
+            "id": art_id,
             "title": art.get("title", ""),
             "url": news_url,
             "source": art.get("source_name", ""),
             "author": art.get("author", None),
             "description": art.get("text", None),
-            "published_at": datetime.fromisoformat(art.get("date")) if art.get("date") else None,
+            "published_at": published,
         })
-    return results
+
+    df = pd.DataFrame(rows)
+    df = standardize_time_column(df, candidates=["published_at", "date"], dest="published_at")
+    schema = {
+        "id": "string",
+        "title": "string",
+        "url": "string",
+        "source": "string",
+        "author": "string",
+        "description": "string",
+        "published_at": "datetime64[ns, UTC]",
+    }
+    df = coerce_schema(df, schema)
+
+    # Optional range filter if since/until were provided in kwargs
+    if since is not None:
+        since_utc = pd.Timestamp(since, tz="UTC") if not isinstance(since, pd.Timestamp) else (since if since.tzinfo else since.tz_localize("UTC"))
+        df = df[df["published_at"] >= since_utc]
+    if until is not None:
+        until_utc = pd.Timestamp(until, tz="UTC") if not isinstance(until, pd.Timestamp) else (until if until.tzinfo else until.tz_localize("UTC"))
+        df = df[df["published_at"] <= until_utc]
+
+    add_dt_partition(df, ts_col="published_at")
+    return df
 
 async def fetch_news_rss(feed_url: str, handle_update: callable, poll_interval: int = DEFAULT_POLL_INTERVAL):
     seen_ids = set()
@@ -86,12 +154,16 @@ async def fetch_news_rss(feed_url: str, handle_update: callable, poll_interval: 
             entry_id = entry.get("id") or entry.get("link")
             if entry_id not in seen_ids:
                 seen_ids.add(entry_id)
+                # Normalize published time to UTC ISO string
+                published_raw = entry.get("published") or entry.get("updated")
+                published_utc = pd.to_datetime(published_raw, utc=True, errors="coerce")
+                published_iso = published_utc.isoformat() if pd.notnull(published_utc) else None
                 item = {
                     "id": entry_id,
                     "title": entry.get("title"),
                     "url": entry.get("link"),
                     "summary": entry.get("summary"),
-                    "published_at": entry.get("published"),
+                    "published_at": published_iso,
                 }
                 result = handle_update(item)
                 if asyncio.iscoroutine(result):
