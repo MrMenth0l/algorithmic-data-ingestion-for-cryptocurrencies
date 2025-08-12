@@ -58,6 +58,13 @@ async def test_fetch_reddit_api_retry_and_metric(monkeypatch):
     assert isinstance(df, pd.DataFrame)
     assert calls['n'] == 1
     assert df.iloc[0]['id'] == '1'
+    # Normalization assertions
+    expected_cols = {"ts", "author", "title", "selftext", "score", "num_comments", "id", "subreddit", "dt"}
+    assert expected_cols.issubset(set(df.columns))
+    # tz-aware UTC dtype string looks like 'datetime64[ns, UTC]'
+    assert str(df["ts"].dtype).endswith("UTC]")
+    # single-day dt partition
+    assert df["dt"].nunique() == 1
 
 @pytest.mark.asyncio
 async def test_fetch_reddit_api_parse_error(monkeypatch):
@@ -72,6 +79,9 @@ async def test_fetch_reddit_api_parse_error(monkeypatch):
     df = await fetch_reddit_api("test", now - timedelta(days=1), now, 1)
     assert df.empty
     assert errors['n'] == 1
+    # Even on errors we return a schema-stable empty DataFrame
+    assert {"ts", "author", "title", "selftext", "score", "num_comments", "id", "subreddit", "dt"}.issubset(set(df.columns))
+    assert str(df["ts"].dtype).endswith("UTC]")
 
 @pytest.mark.asyncio
 async def test_fetch_pushshift_retry_and_metric(monkeypatch):
@@ -88,6 +98,10 @@ async def test_fetch_pushshift_retry_and_metric(monkeypatch):
     df = await fetch_pushshift("test", now - timedelta(days=1), now, 1)
     assert isinstance(df, pd.DataFrame)
     assert calls['n'] == 1
+    expected_cols = {"ts", "author", "title", "selftext", "score", "num_comments", "id", "subreddit", "dt"}
+    assert expected_cols.issubset(set(df.columns))
+    assert str(df["ts"].dtype).endswith("UTC]")
+    assert df["dt"].nunique() == 1
 
 @pytest.mark.asyncio
 async def test_fetch_pushshift_parse_error(monkeypatch):
@@ -99,3 +113,5 @@ async def test_fetch_pushshift_parse_error(monkeypatch):
     df = await fetch_pushshift("test", now - timedelta(days=1), now, 1)
     assert df.empty
     assert errors['n'] == 1
+    assert {"ts", "author", "title", "selftext", "score", "num_comments", "id", "subreddit", "dt"}.issubset(set(df.columns))
+    assert str(df["ts"].dtype).endswith("UTC]")

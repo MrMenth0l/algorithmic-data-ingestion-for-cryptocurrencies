@@ -38,10 +38,12 @@ async def test_fetch_twitter_sentiment_empty(monkeypatch):
     until = datetime(2025, 8, 1,  tzinfo=timezone.utc)
     df = await mod.fetch_twitter_sentiment("test", since, until, max_results=5)
 
-    # Expect an empty DataFrame with the right columns
+    # Expect an empty DataFrame with normalized columns
     assert isinstance(df, pd.DataFrame)
-    assert list(df.columns) == ["ts", "user", "text", "sentiment_score"]
-    assert df.shape[0] == 0
+    assert df.empty
+    expected = {"ts", "author", "text", "likes", "retweets", "sentiment_score", "id", "source", "dt"}
+    assert expected.issubset(set(df.columns))
+    assert str(df["ts"].dtype).endswith("UTC]")
 
 @pytest.mark.asyncio
 async def test_fetch_twitter_sentiment_populated(monkeypatch):
@@ -67,17 +69,21 @@ async def test_fetch_twitter_sentiment_populated(monkeypatch):
 
     # Validate DataFrame
     assert isinstance(df, pd.DataFrame)
-    assert list(df.columns) == ["ts", "user", "text", "sentiment_score"]
+    expected = {"ts", "author", "text", "likes", "retweets", "sentiment_score", "id", "source", "dt"}
+    assert expected.issubset(set(df.columns))
     assert df.shape[0] == 2
 
     # Check contents
     assert df["text"].tolist() == ["Hello world", "Another tweet"]
-    assert df["user"].tolist() == ["123", "456"]
+    assert df["author"].tolist() == ["123", "456"]
     # Timestamps should match and be timezone-aware UTC
-    assert all(ts.tzinfo == timezone.utc for ts in df["ts"])
+    assert all(getattr(ts, 'tzinfo', None) is not None for ts in df["ts"])  # tz-aware
     assert df["ts"].tolist() == [now, now]
     # The placeholder sentiment score remains 0.0
     assert df["sentiment_score"].tolist() == [0.0, 0.0]
+    # Normalization extras
+    assert df["source"].nunique() == 1 and df["source"].iloc[0] == "twitter"
+    assert df["dt"].nunique() == 1
 
 
 # Additional tests for parameter validation, retry logic, and parse error handling
@@ -86,11 +92,11 @@ import tweepy
 @pytest.mark.asyncio
 async def test_parameter_validation(monkeypatch):
     now = datetime(2025, 8, 1, tzinfo=timezone.utc)
-    # Removed the check for since == until raising ValueError
-    with pytest.raises(ValueError):
-        await mod.fetch_twitter_sentiment("q", now - timedelta(hours=1), now, max_results=0)
-    with pytest.raises(ValueError):
-        await mod.fetch_twitter_sentiment("q", now - timedelta(hours=1), now, max_results=101)
+    # Out-of-range max_results should return an empty, schema-correct DF (no exception)
+    df = await mod.fetch_twitter_sentiment("q", now - timedelta(hours=1), now, max_results=0)
+    assert isinstance(df, pd.DataFrame) and df.empty
+    df = await mod.fetch_twitter_sentiment("q", now - timedelta(hours=1), now, max_results=101)
+    assert isinstance(df, pd.DataFrame) and df.empty
 
 
 @pytest.mark.asyncio
@@ -110,6 +116,7 @@ async def test_retry_logic_and_calls(monkeypatch):
     assert isinstance(df, pd.DataFrame)
     # Should increment calls once on initial attempt
     assert calls["n"] == 1
+    assert df.shape[0] == 1
 
 
 @pytest.mark.asyncio
@@ -126,3 +133,6 @@ async def test_sentiment_parse_error(monkeypatch):
     # parse error should increment once for model failure
     assert errors["n"] == 1
     assert df.iloc[0]["sentiment_score"] == 0.0
+    expected = {"ts", "author", "text", "likes", "retweets", "sentiment_score", "id", "source", "dt"}
+    assert expected.issubset(set(df.columns))
+    assert str(df["ts"].dtype).endswith("UTC]")

@@ -79,7 +79,7 @@ async def fetch_reddit_api(subreddit: str, since: datetime, until: datetime, lim
         resp = await _retry_http(client.get, url, params=params)
         resp.raise_for_status()
         try:
-            posts = resp.json().get("data", {}).get("children", [])
+            payload = resp.json()
         except Exception as e:
             REDDIT_PARSE_ERRORS.inc()
             logger.error(f"JSON parse error in fetch_reddit_api: {e}")
@@ -95,6 +95,39 @@ async def fetch_reddit_api(subreddit: str, since: datetime, until: datetime, lim
             })
             add_dt_partition(empty, ts_col="ts")
             return empty
+
+        # Validate structure: expect dict with data.children list
+        if not isinstance(payload, dict):
+            REDDIT_PARSE_ERRORS.inc()
+            empty = coerce_schema(pd.DataFrame(), {
+                "ts": "datetime64[ns, UTC]",
+                "author": "string",
+                "title": "string",
+                "selftext": "string",
+                "score": "Int64",
+                "num_comments": "Int64",
+                "id": "string",
+                "subreddit": "string",
+            })
+            add_dt_partition(empty, ts_col="ts")
+            return empty
+        data_obj = payload.get("data") or {}
+        children = data_obj.get("children")
+        if not isinstance(children, list):
+            REDDIT_PARSE_ERRORS.inc()
+            empty = coerce_schema(pd.DataFrame(), {
+                "ts": "datetime64[ns, UTC]",
+                "author": "string",
+                "title": "string",
+                "selftext": "string",
+                "score": "Int64",
+                "num_comments": "Int64",
+                "id": "string",
+                "subreddit": "string",
+            })
+            add_dt_partition(empty, ts_col="ts")
+            return empty
+        posts = children
 
     # Build normalized rows
     rows: List[Dict[str, Any]] = []
@@ -147,7 +180,7 @@ async def fetch_pushshift(subreddit: str, since: datetime, until: datetime, limi
         resp = await _retry_http(client.get, url, params=params)
         resp.raise_for_status()
         try:
-            data = resp.json().get("data", [])
+            payload = resp.json()
         except Exception as e:
             REDDIT_PARSE_ERRORS.inc()
             logger.error(f"JSON parse error in fetch_pushshift: {e}")
@@ -163,6 +196,23 @@ async def fetch_pushshift(subreddit: str, since: datetime, until: datetime, limi
             })
             add_dt_partition(empty, ts_col="ts")
             return empty
+
+        # Validate structure: expect dict with data list
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            REDDIT_PARSE_ERRORS.inc()
+            empty = coerce_schema(pd.DataFrame(), {
+                "ts": "datetime64[ns, UTC]",
+                "author": "string",
+                "title": "string",
+                "selftext": "string",
+                "score": "Int64",
+                "num_comments": "Int64",
+                "id": "string",
+                "subreddit": "string",
+            })
+            add_dt_partition(empty, ts_col="ts")
+            return empty
+        data = payload.get("data")
 
     # Build normalized rows
     rows: List[Dict[str, Any]] = []

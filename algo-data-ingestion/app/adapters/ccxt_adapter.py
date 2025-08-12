@@ -99,7 +99,7 @@ class CCXTAdapter:
         asks = pd.DataFrame(ob['asks'], columns=['price', 'amount'])
         asks['side'] = 'ask'
         # Stamp snapshot time and identifiers, normalize schema
-        now_utc = pd.Timestamp.utcnow().tz_localize('UTC')
+        now_utc = pd.Timestamp.now(tz='UTC')
         bids['timestamp'] = now_utc
         asks['timestamp'] = now_utc
         bids['symbol'] = symbol

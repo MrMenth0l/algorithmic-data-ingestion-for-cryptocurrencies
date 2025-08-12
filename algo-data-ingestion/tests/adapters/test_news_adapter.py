@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime
+import pandas as pd
 import pytest
 from types import SimpleNamespace
 from httpx import Response
@@ -80,16 +81,19 @@ async def test_fetch_news_api_success(monkeypatch):
     )
 
     results = await fetch_news_api("general", limit=1)
-    assert len(results) == 1
-    item = results[0]
-    assert item["id"] == "abcd1234"  # last 10 chars of URL
-    assert item["title"] == "Test Title"
-    assert item["url"] == "https://example.com/abcd1234"
-    assert item["source"] == "ExampleSource"
-    assert item["author"] == "Alice"
-    assert item["description"] == "Description here"
-    assert isinstance(item["published_at"], datetime)
-    assert item["published_at"] == datetime.fromisoformat("2025-08-01T12:00:00")
+    # We now return a normalized pandas DataFrame
+    assert isinstance(results, pd.DataFrame)
+    assert results.shape[0] == 1
+    # dtype for published_at should be tz-aware UTC
+    assert str(results["published_at"].dtype).endswith("UTC]")
+    row = results.iloc[0]
+    assert row["id"] == "abcd1234"
+    assert row["title"] == "Test Title"
+    assert row["url"] == "https://example.com/abcd1234"
+    assert row["source"] == "ExampleSource"
+    assert row["author"] == "Alice"
+    assert row["description"] == "Description here"
+    assert row["published_at"] == pd.Timestamp("2025-08-01T12:00:00Z")
 
 
 @pytest.mark.asyncio
@@ -144,7 +148,7 @@ async def test_fetch_news_rss(monkeypatch):
     assert item["title"] == "News 1"
     assert item["url"] == "url1"
     assert item["summary"] == "Sum1"
-    assert item["published_at"] == "Wed, 01 Aug 2025 12:00:00 GMT"
+    assert item["published_at"] == "2025-08-01T12:00:00+00:00"
 
 
 # 1. Test retry logic in fetch_news_api
@@ -180,7 +184,8 @@ async def test_fetch_news_api_parse_error(monkeypatch):
     monkeypatch.setattr(mod, "NEWS_PARSE_ERRORS", SimpleNamespace(inc=lambda: called.__setitem__("n", called.get("n", 0)+1)))
     monkeypatch.setattr("app.adapters.news_adapter.httpx.AsyncClient", lambda *args, **kwargs: FakeClient(fake_get))
     results = await fetch_news_api("general", limit=1)
-    assert results == []
+    assert isinstance(results, pd.DataFrame)
+    assert results.empty
     assert called["n"] == 1
 
 
@@ -233,7 +238,8 @@ async def test_news_api_calls_metric(monkeypatch):
         lambda *args, **kwargs: FakeClient(fake_get)
     )
     results = await fetch_news_api("general", limit=1)
-    assert results == []
+    assert isinstance(results, pd.DataFrame)
+    assert results.empty
     # Should have incremented once at function start
     assert calls["n"] == 1
 

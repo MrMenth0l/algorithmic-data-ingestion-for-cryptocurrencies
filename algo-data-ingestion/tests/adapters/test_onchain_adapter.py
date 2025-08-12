@@ -66,16 +66,17 @@ async def test_fetch_glassnode(monkeypatch):
     )
 
     df = await fetch_glassnode("BTC", "address_exits", days=1)
-    # Expect a DataFrame with two rows, correct columns and dtypes
+    # Expect a DataFrame with two rows, normalized columns and UTC timestamp
     assert isinstance(df, pd.DataFrame)
-    assert set(df.columns) == {"source", "symbol", "metric", "timestamp", "value"}
+    expected_min = {"source", "symbol", "metric", "timestamp", "value", "dt"}
+    assert expected_min.issubset(set(df.columns))
+    # timestamp is tz-aware UTC
+    assert pd.api.types.is_datetime64tz_dtype(df["timestamp"]) or str(df["timestamp"].dtype).endswith("UTC]")
+    # values match
     assert df.shape[0] == 2
     assert df["source"].unique().tolist() == ["glassnode"]
     assert df["symbol"].unique().tolist() == ["BTC"]
     assert df["metric"].unique().tolist() == ["address_exits"]
-    # timestamp is datetime64[ns, UTC]
-    assert pd.api.types.is_datetime64_ns_dtype(df["timestamp"])
-    # values match
     assert df["value"].tolist() == [42.0, 84.0]
 
 @pytest.mark.asyncio
@@ -85,11 +86,15 @@ async def test_fetch_covalent(monkeypatch):
             "contract_ticker_symbol": "ETH",
             "balance": "1000000000000000000",  # 1 ETH in wei
             "contract_decimals": 18,
+            "contract_address": "0xeeee",
+            "contract_name": "Ether",
         },
         {
             "contract_ticker_symbol": "USDC",
             "balance": "5000000",  # 5 USDC with 6 decimals
             "contract_decimals": 6,
+            "contract_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            "contract_name": "USD Coin",
         },
     ]
 
@@ -105,15 +110,19 @@ async def test_fetch_covalent(monkeypatch):
     )
 
     df = await fetch_covalent(chain_id=1, address="0xabc")
-    # Validate DataFrame
+    # Validate normalized DataFrame
     assert isinstance(df, pd.DataFrame)
-    assert set(df.columns) == {"source", "symbol", "metric", "timestamp", "value"}
-    assert df.shape[0] == 2
+    expected_min = {"source", "symbol", "metric", "timestamp", "value", "dt"}
+    assert expected_min.issubset(set(df.columns))
+    # include contract metadata columns
+    assert {"contract_address", "contract_name"}.issubset(set(df.columns))
+    # timestamp tz-aware UTC
+    assert pd.api.types.is_datetime64tz_dtype(df["timestamp"]) or str(df["timestamp"].dtype).endswith("UTC]")
+
     # Check conversions
     eth_row = df[df["symbol"] == "ETH"].iloc[0]
     assert eth_row["source"] == "covalent"
     assert eth_row["metric"] == "balance"
-    # value should be 1.0
     assert pytest.approx(eth_row["value"], rel=1e-6) == 1.0
 
     usdc_row = df[df["symbol"] == "USDC"].iloc[0]

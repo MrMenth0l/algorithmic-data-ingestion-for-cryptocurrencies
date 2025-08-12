@@ -41,11 +41,14 @@ async def test_fetch_ohlcv(dummy_exchange):
     adapter = CCXTAdapter("binance")
     since = datetime(2021, 1, 1)
     df = await adapter.fetch_ohlcv("BTC/USDT", "1d", since, limit=2)
-    # should return a DataFrame with proper dtypes
+    # should return a DataFrame with normalized columns and UTC timestamp
     assert isinstance(df, pd.DataFrame)
-    assert list(df.columns) == ["timestamp", "open", "high", "low", "close", "volume"]
-    assert df["timestamp"].dtype == "datetime64[ns]"
-    assert df.shape == (2, 6)
+    expected_cols = {"timestamp", "open", "high", "low", "close", "volume", "symbol", "exchange", "timeframe", "dt"}
+    assert expected_cols.issubset(set(df.columns))
+    # tz-aware UTC dtype string looks like 'datetime64[ns, UTC]'
+    assert str(df["timestamp"].dtype).endswith("UTC]")
+    # two rows from our dummy
+    assert df.shape[0] == 2
 
 @pytest.mark.asyncio
 async def test_fetch_order_book(dummy_exchange):
@@ -54,6 +57,10 @@ async def test_fetch_order_book(dummy_exchange):
     # expect 4 rows (2 bids + 2 asks)
     assert df.shape[0] == 4
     assert set(df["side"]) == {"bid", "ask"}
+    # normalized extras
+    assert "dt" in df.columns
+    assert "symbol" in df.columns and "exchange" in df.columns
+    assert str(df["timestamp"].dtype).endswith("UTC]")
 
 @pytest.mark.asyncio
 async def test_list_symbols_and_balance(dummy_exchange):
