@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import json
 import time
 import logging
+import os
 
 import pandas as pd
 from prometheus_client import Counter, Histogram
@@ -96,7 +97,7 @@ class RedisFeatureStore:
             raise RuntimeError("REDIS_URL is not configured")
         self._url = url
         self._namespace = (namespace or "features").strip()
-        self._default_ttl = default_ttl
+        self._default_ttl = int(default_ttl) if (default_ttl not in (None, "", "None")) else None
         self._client: Optional[aioredis.Redis] = redis_client
         self._decode_responses = decode_responses
 
@@ -110,6 +111,7 @@ class RedisFeatureStore:
         if self._client is None:
             self._client = aioredis.from_url(
                 self._url,
+                encoding="utf-8",
                 decode_responses=self._decode_responses,
             )
         return self._client
@@ -173,7 +175,8 @@ class RedisFeatureStore:
                 key = self._key(domain, symbol, timeframe, epoch_s)
                 keys.append(key)
                 payload = json.dumps(it["payload"], default=str)
-                await pipe.set(key, payload, ex=ttl or self._default_ttl)
+                # IMPORTANT: do NOT `await` individual pipeline commands
+                pipe.set(key, payload, ex=ttl or self._default_ttl)
                 FEATURE_WRITES_TOTAL.labels(domain=domain).inc()
             await pipe.execute()
         FEATURE_OP_LATENCY.labels(op="batch_write").observe(time.perf_counter() - start)
@@ -220,20 +223,31 @@ _store_singleton: Optional[RedisFeatureStore] = None
 
 
 def get_store() -> RedisFeatureStore:
-    """Return a process-wide singleton store using settings.* values.
+    """Return a process-wide singleton store using settings/env values.
 
-    settings:
+    settings/env keys:
       - REDIS_URL (str)                e.g. redis://redis:6379/0
+      - REDIS_HOST/PORT/DB             used to synthesize URL if REDIS_URL missing
       - FEATURE_TTL_SEC (int|None)     default TTL for writes
       - FEATURE_NAMESPACE (str)        key namespace, default 'features'
     """
     global _store_singleton
     if _store_singleton is None:
-        url = getattr(settings, "REDIS_URL", None)
-        ttl = getattr(settings, "FEATURE_TTL_SEC", None)
-        ns = getattr(settings, "FEATURE_NAMESPACE", "features")
+        # Prefer settings.REDIS_URL, then env, then synthesize from host/port/db
+        url = getattr(settings, "REDIS_URL", None) or os.getenv("REDIS_URL")
+        if not url:
+            host = getattr(settings, "REDIS_HOST", None) or os.getenv("REDIS_HOST", "redis")
+            port = getattr(settings, "REDIS_PORT", None) or os.getenv("REDIS_PORT", "6379")
+            db = getattr(settings, "REDIS_DB", None) or os.getenv("REDIS_DB", "0")
+            url = f"redis://{host}:{port}/{db}"
+
+        ttl_raw = getattr(settings, "FEATURE_TTL_SEC", None) or os.getenv("FEATURE_TTL_SEC")
+        ttl = int(ttl_raw) if ttl_raw not in (None, "", "None") else None
+
+        ns = getattr(settings, "FEATURE_NAMESPACE", None) or os.getenv("FEATURE_NAMESPACE", "features")
+
         _store_singleton = RedisFeatureStore(url=url, namespace=ns, default_ttl=ttl)
-        logger.info("RedisFeatureStore initialized", extra={"namespace": ns, "ttl": ttl})
+        logger.info("RedisFeatureStore initialized: url=%s namespace=%s ttl=%s", url, ns, ttl)
     return _store_singleton
 
 

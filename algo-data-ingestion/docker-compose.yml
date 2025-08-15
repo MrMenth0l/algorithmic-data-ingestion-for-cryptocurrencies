@@ -22,10 +22,11 @@ services:
     env_file:
       - .env
     environment:
-      # Ensure the app talks to the compose Redis service
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
       - REDIS_URL=redis://redis:6379/0
-      - FEATURE_TTL_SEC=300
       - FEATURE_NAMESPACE=features
+      - FEATURE_TTL_SEC=3600
     volumes:
       # Mount only the data lake for persistence; code is baked via Dockerfile build
       - ./data_lake:/app/data_lake
