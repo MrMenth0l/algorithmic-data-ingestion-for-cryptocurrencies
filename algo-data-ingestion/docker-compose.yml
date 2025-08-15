@@ -27,6 +27,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - FEATURE_NAMESPACE=features
       - FEATURE_TTL_SEC=3600
+      - ADMIN_TOKEN=supersecret
     volumes:
       # Mount only the data lake for persistence; code is baked via Dockerfile build
       - ./data_lake:/app/data_lake
@@ -39,7 +40,18 @@ services:
       uvicorn app.ingestion_service.main:app
       --host 0.0.0.0
       --port 8000
-      --workers 2
+      --workers 1
+    restart: unless-stopped
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.62.0
+    command:
+      - "--redis.addr=redis://redis:6379"
+    ports:
+      - "9121:9121"
+    depends_on:
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
   prometheus:
@@ -51,6 +63,10 @@ services:
     depends_on:
       ingestion-api:
         condition: service_started
+    command: >
+      /bin/prometheus
+      --config.file=/etc/prometheus/prometheus.yml
+      --web.enable-lifecycle
     restart: unless-stopped
 
   grafana:

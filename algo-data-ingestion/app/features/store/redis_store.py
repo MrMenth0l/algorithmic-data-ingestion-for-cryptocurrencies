@@ -250,6 +250,20 @@ def get_store() -> RedisFeatureStore:
         logger.info("RedisFeatureStore initialized: url=%s namespace=%s ttl=%s", url, ns, ttl)
     return _store_singleton
 
+# Ensure our metric families exist in the registry as soon as this
+# module is imported (before any reads/writes happen).
+def _ensure_metric_families() -> None:
+    try:
+        FEATURE_WRITES_TOTAL.labels(domain="bootstrap").inc(0)
+        FEATURE_READS_TOTAL.labels(domain="bootstrap").inc(0)
+        FEATURE_HITS_TOTAL.labels(domain="bootstrap").inc(0)
+        FEATURE_MISSES_TOTAL.labels(domain="bootstrap").inc(0)
+        FEATURE_OP_LATENCY.labels(op="init").observe(0.0)
+    except Exception:
+        # Don't crash import if prometheus_client changes; it's just a warmup.
+        pass
+
+_ensure_metric_families()
 
 __all__ = [
     "RedisFeatureStore",

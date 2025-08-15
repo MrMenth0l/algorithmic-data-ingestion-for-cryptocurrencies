@@ -1,6 +1,7 @@
 from pydantic_settings import BaseSettings
 from pydantic import Field
 from dotenv import load_dotenv
+from typing import Optional
 load_dotenv()  # this will read your .env into os.environ
 class Settings(BaseSettings):
     twitter_api_key: str | None = Field(None, env="TWITTER_API_KEY")
@@ -43,6 +44,17 @@ class Settings(BaseSettings):
     log_level: str = Field("INFO", env="LOG_LEVEL")
     #Metrics/Prometheus
     metrics_path: str = Field("/metrics", env="METRICS_PATH")
+
+    BACKFILL_ENABLED: bool = Field(default=False)
+    BACKFILL_EXCHANGE: str = Field(default="binance")
+    BACKFILL_SYMBOLS: str = Field(default="BTC/USDT")  # comma-separated
+    BACKFILL_TIMEFRAMES: str = Field(default="1m")     # comma-separated
+    BACKFILL_LOOKBACK_MIN: int = Field(default=120)
+    BACKFILL_INTERVAL_SEC: int = Field(default=300)
+
+    TTL_SWEEP_ENABLED: bool = Field(default=False)
+    TTL_SWEEP_INTERVAL_SEC: int = Field(default=600)
+    ADMIN_TOKEN: Optional[str] = None
 
     class Config:
         env_file = ".env"

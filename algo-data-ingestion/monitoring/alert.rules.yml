@@ -1,0 +1,32 @@
+groups:
+- name: feature-store
+  rules:
+  - alert: FeatureWritesStalled
+    expr: sum by (domain) (rate(feature_writes_total[10m])) <= 0
+    for: 10m
+    labels: { severity: warning }
+    annotations:
+      summary: "Feature writes stalled ({{ $labels.domain }})"
+      description: "No feature writes recorded for domain={{ $labels.domain }} in the last 10 minutes."
+
+  - alert: FeatureStoreHighLatencyP99
+    expr: histogram_quantile(
+            0.99,
+            sum by (le, op) (rate(feature_op_latency_seconds_bucket[5m]))
+          ) > 0.25
+    for: 5m
+    labels: { severity: critical }
+    annotations:
+      summary: "High p99 store latency ({{ $labels.op }})"
+      description: "p99 > 250ms for op={{ $labels.op }} over the last 5 minutes."
+
+  - alert: FeatureStoreLowHitRatio
+    expr: (
+            sum by (domain) (rate(feature_hits_total[15m])) /
+            clamp_min(sum by (domain) (rate(feature_reads_total[15m])), 1)
+          ) < 0.2
+    for: 15m
+    labels: { severity: warning }
+    annotations:
+      summary: "Low cache hit ratio ({{ $labels.domain }})"
+      description: "Hit ratio < 20% over 15m for domain={{ $labels.domain }}."

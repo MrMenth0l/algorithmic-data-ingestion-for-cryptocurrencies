@@ -1,16 +1,62 @@
 from fastapi import FastAPI, Request
+import asyncio
 from prometheus_client import make_asgi_app
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 from app.ingestion_service.utils import _METRICS_REGISTRY
 from app.ingestion_service.config import settings
+from app.features.jobs.backfill import backfill_market_once, ttl_sweep_once
 from contextlib import asynccontextmanager
 from app.features.ingestion.news_client import NewsClient
 from app.features.ingestion.ccxt_client import CCXTClient
 from app.features.ingestion.social_client import SocialClient
 from app.features.ingestion.onchain_client import OnchainClient
+from app.features.store import redis_store as _feature_store  # noqa: F401
+from prometheus_client import Gauge
+from app.ingestion_service.utils import _METRICS_REGISTRY
+
+# Ensure redis_store gets imported so its Counter/Histogram register with our custom registry
+try:
+    from app.features.store import redis_store as _feature_store  # noqa: F401
+except Exception as e:
+    import logging
+    logging.warning("Feature store import failed (metrics may be missing): %s", e)
+
+# Optional: one “always present” metric so /metrics is never empty
+SERVICE_INFO = Gauge(
+    "service_info",
+    "Service metadata",
+    labelnames=("service", "version"),
+    registry=_METRICS_REGISTRY,
+)
+SERVICE_INFO.labels(service="raw-data-ingestion", version="1.0.0").set(1)
+
+logger = logging.getLogger(__name__)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # --- PROMETHEUS: register default collectors into our custom registry ---  # NEW
+    try:
+        # These classes exist in recent prometheus_client versions
+        from prometheus_client import GCCollector, ProcessCollector, PlatformCollector  # NEW
+        GCCollector(registry=_METRICS_REGISTRY)                                       # NEW
+        ProcessCollector(registry=_METRICS_REGISTRY)                                  # NEW
+        PlatformCollector(registry=_METRICS_REGISTRY)                                 # NEW
+    except Exception:
+        # Older client fallback (optional) – ok to ignore if not available
+        pass
+
+    # --- PROMETHEUS: eager-import feature metrics so they’re registered now --- # NEW
+    from app.features.store import redis_store as _fs                                  # NEW
+    # Touch the counters so the HELP/TYPE and metric families appear immediately     # NEW
+    for dom in ("bootstrap", "market"):                                               # NEW
+        _fs.FEATURE_WRITES_TOTAL.labels(domain=dom).inc(0)                            # NEW
+        _fs.FEATURE_READS_TOTAL.labels(domain=dom).inc(0)                             # NEW
+        _fs.FEATURE_HITS_TOTAL.labels(domain=dom).inc(0)                              # NEW
+        _fs.FEATURE_MISSES_TOTAL.labels(domain=dom).inc(0)                            # NEW
+    # --------------------------------------------------------------------------  # NEW
+
     # Create shared NewsClient instance
     app.state.news_client = NewsClient()
     # Create shared CCXT client (async)
@@ -52,6 +98,50 @@ async def health():
     return {"status": "ok"}
 
 @app.on_event("startup")
+async def _start_jobs():
+    app.state._bg_tasks = []
+
+    if settings.BACKFILL_ENABLED:
+        async def _backfill_loop():
+            while True:
+                try:
+                    for sym in [s.strip() for s in settings.BACKFILL_SYMBOLS.split(",") if s.strip()]:
+                        for tf in [t.strip() for t in settings.BACKFILL_TIMEFRAMES.split(",") if t.strip()]:
+                            await backfill_market_once(
+                                exchange=settings.BACKFILL_EXCHANGE,
+                                symbol=sym,
+                                timeframe=tf,
+                                lookback_minutes=settings.BACKFILL_LOOKBACK_MIN,
+                            )
+                except Exception as e:
+                    logger.warning("Backfill loop error: %s", e, exc_info=True)
+                await asyncio.sleep(settings.BACKFILL_INTERVAL_SEC)
+
+        app.state._bg_tasks.append(asyncio.create_task(_backfill_loop()))
+
+    if settings.TTL_SWEEP_ENABLED:
+        async def _ttl_loop():
+            while True:
+                try:
+                    await ttl_sweep_once(
+                        pattern="features:market:*",
+                        ttl_default=getattr(settings, "FEATURE_TTL_SEC", None),
+                        max_keys=None,
+                    )
+                except Exception as e:
+                    logger.warning("TTL sweep loop error: %s", e, exc_info=True)
+                await asyncio.sleep(settings.TTL_SWEEP_INTERVAL_SEC)
+
+        app.state._bg_tasks.append(asyncio.create_task(_ttl_loop()))
+
+@app.on_event("shutdown")
+async def _stop_jobs():
+    tasks = getattr(app.state, "_bg_tasks", [])
+    for t in tasks:
+        t.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+@app.on_event("startup")
 async def on_startup():
     logging.info("Starting Raw Data Ingestion Service")
 
@@ -60,10 +150,7 @@ async def on_shutdown():
     logging.info("Shutting down Raw Data Ingestion Service")
 
 def get_news(request: Request) -> NewsClient:
-    client = request.app.state.news
-    if client is None:
-        raise RuntimeError("NewsClient not initialized; check lifespan wiring.")
-    return client
+    return request.app.state.news_client
 
 def get_ccxt(request: Request) -> CCXTClient:
     return request.app.state.ccxt_client

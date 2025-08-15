@@ -1,9 +1,31 @@
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
+  scrape_timeout: 10s
 
 scrape_configs:
+  # Ingestion API (FastAPI) — exposes /metrics/
   - job_name: ingestion-api
     metrics_path: /metrics/
+    honor_labels: true
     static_configs:
       - targets: ["ingestion-api:8000"]
+        labels:
+          service: ingestion-api
+
+  # Prometheus self-scrape
+  - job_name: prometheus
+    static_configs:
+      - targets: ["prometheus:9090"]
+        labels:
+          service: prometheus
+
+  # Redis metrics via redis_exporter
+  - job_name: redis
+    static_configs:
+      - targets: ["redis-exporter:9121"]
+        labels:
+          service: redis
+
+rule_files:
+  - /etc/prometheus/alert.rules.yml

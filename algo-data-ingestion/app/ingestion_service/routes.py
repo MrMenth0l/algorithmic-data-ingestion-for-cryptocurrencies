@@ -5,6 +5,10 @@ import math
 import logging
 from datetime import datetime, timezone
 from typing import Optional, List, Any
+from app.features.jobs.backfill import backfill_market_once, ttl_sweep_once
+from fastapi import BackgroundTasks
+from fastapi import Security
+from fastapi.security import APIKeyHeader
 
 import pandas as pd
 import redis
@@ -519,3 +523,48 @@ async def _write_market_features_to_store(df: pd.DataFrame) -> int:
     store = get_store()
     await store.batch_write(items)
     return len(items)
+
+# --- Admin guard via header token ---
+_admin_hdr = APIKeyHeader(name="X-Admin-Token", auto_error=False)
+
+def require_admin(token: Optional[str] = Security(_admin_hdr)):
+    expected = getattr(settings, "ADMIN_TOKEN", None)
+    # Dev-friendly default: if no ADMIN_TOKEN is set, allow (but warn).
+    # Set ADMIN_TOKEN in prod to enforce.
+    if not expected:
+        logger.warning("ADMIN_TOKEN not set; admin endpoints are not protected")
+        return True
+    if token == expected:
+        return True
+    raise HTTPException(status_code=401, detail="Admin token required")
+
+@router.post("/admin/backfill/market", dependencies=[Depends(require_admin)])
+async def admin_backfill_market(
+    exchange: str = "binance",
+    symbol: str = Query(..., description="e.g. BTC/USDT"),
+    timeframe: str = Query(..., description="e.g. 1m"),
+    lookback_minutes: int = Query(120, ge=1, le=7*24*60),
+):
+    """
+    One-shot backfill for (exchange, symbol, timeframe) over the last N minutes.
+    """
+    result = await backfill_market_once(
+        exchange=exchange,
+        symbol=symbol,
+        timeframe=timeframe,
+        lookback_minutes=lookback_minutes,
+    )
+    return result
+
+
+@router.post("/admin/features/ttl-sweep", dependencies=[Depends(require_admin)])
+async def admin_ttl_sweep(
+    pattern: str = Query("features:market:*"),
+    ttl_default: Optional[int] = Query(None, description="Seconds to apply when no TTL is set"),
+    max_keys: Optional[int] = Query(None, description="Stop after scanning this many keys"),
+):
+    """
+    One-shot TTL sweep: ensures keys under pattern have expirations.
+    """
+    result = await ttl_sweep_once(pattern=pattern, ttl_default=ttl_default, max_keys=max_keys)
+    return result
