@@ -1,5 +1,4 @@
 from fastapi import FastAPI, Request
-from .routes import router
 from prometheus_client import make_asgi_app
 from fastapi.middleware.cors import CORSMiddleware
 import logging
@@ -10,7 +9,6 @@ from app.features.ingestion.news_client import NewsClient
 from app.features.ingestion.ccxt_client import CCXTClient
 from app.features.ingestion.social_client import SocialClient
 from app.features.ingestion.onchain_client import OnchainClient
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Create shared NewsClient instance
@@ -41,7 +39,7 @@ app.add_middleware(
     allow_headers=["*"],
     allow_credentials = True,
 )
-app.include_router(router, prefix="/ingest")
+
 # Expose Prometheus metrics at /metrics
 app.mount("/metrics", make_asgi_app(registry=_METRICS_REGISTRY))
 
@@ -62,7 +60,10 @@ async def on_shutdown():
     logging.info("Shutting down Raw Data Ingestion Service")
 
 def get_news(request: Request) -> NewsClient:
-    return request.app.state.news_client
+    client = request.app.state.news
+    if client is None:
+        raise RuntimeError("NewsClient not initialized; check lifespan wiring.")
+    return client
 
 def get_ccxt(request: Request) -> CCXTClient:
     return request.app.state.ccxt_client
@@ -81,3 +82,6 @@ if __name__ == "__main__":
         port=settings.ingest_port,
         reload=True
     )
+
+from .routes import router
+app.include_router(router, prefix="/ingest")
