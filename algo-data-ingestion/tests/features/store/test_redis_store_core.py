@@ -2,6 +2,11 @@ import asyncio
 import pytest
 import pandas as pd
 
+import os
+from prometheus_client import generate_latest
+from app.features.store import redis_store as rs
+from app.ingestion_service.utils import _METRICS_REGISTRY
+
 fakeredis = pytest.importorskip("fakeredis.aioredis")  # ensures dev dep present
 from fakeredis.aioredis import FakeRedis  # type: ignore
 
@@ -63,9 +68,10 @@ async def test_batch_write_and_batch_read():
         [
             ("market", "ETH/USDT", "1m", 1),
             ("market", "ETH/USDT", "1m", 2),
+            ("market", "ETH/USDT", "1m", 3),  # miss
         ]
     )
-    assert vals == [{"x": 2}, {"x": 3}]
+    assert vals == [{"x": 2}, {"x": 3}, None]
 
     await store.aclose()
 
@@ -137,4 +143,80 @@ async def test_symbol_sanitization_in_key():
         payload={"ok": True},
     )
     assert key == "features:market:AVAX-USDT:15m:42"
+    await store.aclose()
+
+
+# Additional tests
+@pytest.mark.asyncio
+async def test_epoch_ms_key():
+    r = FakeRedis(decode_responses=True)
+    store = RedisFeatureStore(url="redis://fake", namespace="features", redis_client=r)
+    # milliseconds should be normalized down to seconds in the key
+    key = await store.write(
+        domain="market",
+        symbol="BTC/USDT",
+        timeframe="1m",
+        ts=1_700_000_000_000,  # ms
+        payload={"ok": True},
+    )
+    assert key.endswith(":1700000000")
+    await store.aclose()
+
+
+def test_missing_url_raises():
+    with pytest.raises(RuntimeError):
+        RedisFeatureStore(url="")
+
+
+def test_get_store_synthesizes_url(monkeypatch):
+    # Reset singleton
+    rs._store_singleton = None
+
+    # Dummy settings object with no URL so env vars are used
+    class Dummy:
+        REDIS_URL = None
+        REDIS_HOST = None
+        REDIS_PORT = None
+        REDIS_DB = None
+        FEATURE_TTL_SEC = "5"
+        FEATURE_NAMESPACE = "featns"
+
+    monkeypatch.setattr(rs, "settings", Dummy())
+
+    # Env vars synthesize URL
+    monkeypatch.setenv("REDIS_URL", "")
+    monkeypatch.setenv("REDIS_HOST", "myredis")
+    monkeypatch.setenv("REDIS_PORT", "6380")
+    monkeypatch.setenv("REDIS_DB", "2")
+
+    store = rs.get_store()
+    assert isinstance(store, RedisFeatureStore)
+    assert store._url == "redis://myredis:6380/2"
+
+    # Cleanup
+    rs._store_singleton = None
+
+
+@pytest.mark.asyncio
+async def test_metrics_exposed_after_ops():
+    r = FakeRedis(decode_responses=True)
+    store = RedisFeatureStore(url="redis://fake", namespace="features", redis_client=r)
+
+    # perform a write and a read to trigger counters/histogram
+    await store.write(
+        domain="market",
+        symbol="BTC/USDT",
+        timeframe="1m",
+        ts=0,
+        payload={"v": 1},
+    )
+    await store.read(domain="market", symbol="BTC/USDT", timeframe="1m", ts=0)
+
+    # Scrape the custom registry and ensure metric families exist
+    text = generate_latest(_METRICS_REGISTRY).decode("utf-8")
+    assert "feature_writes_total" in text
+    assert "feature_reads_total" in text
+    assert "feature_hits_total" in text or "feature_misses_total" in text
+    assert "feature_op_latency_seconds_bucket" in text
+
     await store.aclose()

@@ -29,7 +29,6 @@ services:
       - FEATURE_TTL_SEC=3600
       - ADMIN_TOKEN=supersecret
     volumes:
-      # Mount only the data lake for persistence; code is baked via Dockerfile build
       - ./data_lake:/app/data_lake
     ports:
       - "8000:8000"
@@ -60,13 +59,13 @@ services:
       - "9090:9090"
     volumes:
       - ./monitoring:/etc/prometheus:ro
+      - prometheus-data:/prometheus
     depends_on:
       ingestion-api:
         condition: service_started
-    command: >
-      /bin/prometheus
-      --config.file=/etc/prometheus/prometheus.yml
-      --web.enable-lifecycle
+    command: [ "--config.file=/etc/prometheus/prometheus.yml",
+               "--storage.tsdb.path=/prometheus",
+               "--web.enable-lifecycle" ]
     restart: unless-stopped
 
   grafana:
@@ -87,3 +86,4 @@ services:
 
 volumes:
   redis-data: {}
+  prometheus-data: {}

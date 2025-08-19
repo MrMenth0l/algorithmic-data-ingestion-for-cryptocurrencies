@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import math
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Any
 from app.features.jobs.backfill import backfill_market_once, ttl_sweep_once
 from fastapi import BackgroundTasks
 from fastapi import Security
 from fastapi.security import APIKeyHeader
+import inspect
 
 import pandas as pd
 import redis
@@ -61,6 +62,8 @@ _redis = redis.Redis(
 # Helpers
 # ---------------------------
 
+def provide_store() -> RedisFeatureStore:
+    return get_store()
 def _parse_epoch_sec(ts: Optional[int]) -> Optional[datetime]:
     if ts is None:
         return None
@@ -88,6 +91,61 @@ def provide_news() -> NewsClient:
     """Local provider to avoid circular import from main."""
     return NewsClient()
 
+def _ensure_utc_col(df: pd.DataFrame, col: str) -> pd.DataFrame:
+    """
+    Force df[col] to tz-aware UTC, robust to:
+      - tz-naive pandas Timestamps
+      - tz-aware pandas Timestamps (any tz)
+      - strings / ints / floats / py datetimes
+      - object-dtype mixes
+    """
+    if df is None or df.empty or col not in df.columns:
+        return df
+
+    def _to_utc_one(x):
+        if isinstance(x, pd.Timestamp):
+            return x.tz_convert("UTC") if x.tzinfo is not None else x.tz_localize("UTC")
+        # parse strings/ints/floats/datetimes
+        t = pd.to_datetime(x, errors="coerce")  # don't pass utc=True here
+        if pd.isna(t):
+            return pd.NaT
+        if isinstance(t, pd.Timestamp):
+            return t.tz_convert("UTC") if t.tzinfo is not None else t.tz_localize("UTC")
+        return pd.NaT
+
+    df[col] = df[col].map(_to_utc_one)
+    return df
+
+def _force_epoch_then_utc(df: pd.DataFrame, col: str) -> pd.DataFrame:
+    """
+    Fallback: convert df[col] to epoch seconds (robust to tz/naive/str),
+    then rebuild it as UTC tz-aware timestamps deterministically.
+    """
+    if df is None or df.empty or col not in df.columns:
+        return df
+    df = df.copy()
+    df["__epoch_s"] = df[col].map(_epoch_s_from_ts)
+    df[col] = pd.to_datetime(df["__epoch_s"], unit="s", utc=True)
+    df.drop(columns=["__epoch_s"], inplace=True, errors="ignore")
+    return df
+
+
+def _epoch_s_from_ts(ts: Any) -> int:
+    # robust conversion to epoch seconds for pandas/py dt/int/str
+    if isinstance(ts, pd.Timestamp):
+        t = ts.tz_convert("UTC") if ts.tzinfo is not None else ts.tz_localize("UTC")
+        return int(t.value // 1_000_000_000)
+    from datetime import datetime as _dt
+    if isinstance(ts, _dt):
+        t = ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)
+        return int(t.astimezone(timezone.utc).timestamp())
+    if isinstance(ts, (int, float)):
+        # treat >10B as milliseconds, else seconds
+        return int(ts // 1000) if ts > 10_000_000_000 else int(ts)
+    return int(pd.to_datetime(ts, utc=True).value // 1_000_000_000)
+
+async def _resolve(maybe_coro):
+    return await maybe_coro if inspect.isawaitable(maybe_coro) else maybe_coro
 # ---------------------------
 # CCXT (GET) Historical
 # ---------------------------
@@ -186,93 +244,171 @@ async def ingest_market(exchange: str, body: MarketIngestRequest):
     if path is None:
         return {"status": "no_data", "path": None, "features_written": features_written}
     return {"status": "ok", "path": str(path), "features_written": features_written}
+
+
 # ---------------------------
 # Onchain Ingest (POST)
 # ---------------------------
-
 @router.post("/onchain/{source}")
 async def ingest_onchain(source: str, body: OnchainIngestRequest):
-    source_l = source.lower()
-    if source_l == "glassnode":
-        df = await fetch_glassnode(body.symbol, body.metric, days=body.days)
-        base = settings.ONCHAIN_PATH + "/glassnode"
-        partitions = {
-            "symbol": body.symbol or "",
-            "metric": body.metric or "",
-            "year": df["timestamp"].dt.year.iloc[0] if not df.empty and "timestamp" in df.columns else None,
-            "month": df["timestamp"].dt.month.iloc[0] if not df.empty and "timestamp" in df.columns else None,
-            "day": df["timestamp"].dt.day.iloc[0] if not df.empty and "timestamp" in df.columns else None,
-        }
-    elif source_l == "covalent":
-        df = await fetch_covalent(chain_id=body.chain_id, address=body.address)
-        base = settings.ONCHAIN_PATH + "/covalent"
-        partitions = {
-            "chain_id": body.chain_id,
-            "address": body.address or "",
-            "year": df["timestamp"].dt.year.iloc[0] if not df.empty and "timestamp" in df.columns else None,
-            "month": df["timestamp"].dt.month.iloc[0] if not df.empty and "timestamp" in df.columns else None,
-            "day": df["timestamp"].dt.day.iloc[0] if not df.empty and "timestamp" in df.columns else None,
-        }
-    else:
-        raise HTTPException(status_code=400, detail=f"Unknown onchain source: {source}")
-
     try:
-        path = write_to_parquet(df, base, partitions)
-    except ValueError as ve:
-        raise HTTPException(status_code=422, detail=str(ve))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Write failed: {e}")
+        source_l = source.lower()
+        if source_l == "glassnode":
+            df = await _resolve(fetch_glassnode(body.symbol, body.metric, days=body.days))
+            try:
+                df = _ensure_utc_col(df, "timestamp")
+            except Exception as norm_err:
+                logger.warning("UTC normalize failed for onchain/glassnode; falling back via epoch: %s", norm_err)
+                df = _force_epoch_then_utc(df, "timestamp")
+            base = getattr(settings, "ONCHAIN_PATH", "/app/data_lake/onchain") + "/glassnode"
+            partitions = {
+                "symbol": body.symbol or "",
+                "metric": body.metric or "",
+                "year": df["timestamp"].dt.year.iloc[0] if (
+                    df is not None and not df.empty and "timestamp" in df.columns
+                ) else None,
+                "month": df["timestamp"].dt.month.iloc[0] if (
+                    df is not None and not df.empty and "timestamp" in df.columns
+                ) else None,
+                "day": df["timestamp"].dt.day.iloc[0] if (
+                    df is not None and not df.empty and "timestamp" in df.columns
+                ) else None,
+            }
+        elif source_l == "covalent":
+            df = await _resolve(fetch_covalent(chain_id=body.chain_id, address=body.address))
+            try:
+                df = _ensure_utc_col(df, "timestamp")
+            except Exception as norm_err:
+                logger.warning("UTC normalize failed for onchain/glassnode; falling back via epoch: %s", norm_err)
+                df = _force_epoch_then_utc(df, "timestamp")
+            base = getattr(settings, "ONCHAIN_PATH", "/app/data_lake/onchain") + "/covalent"
+            partitions = {
+                "chain_id": body.chain_id,
+                "address": body.address or "",
+                "year": df["timestamp"].dt.year.iloc[0] if (
+                    df is not None and not df.empty and "timestamp" in df.columns
+                ) else None,
+                "month": df["timestamp"].dt.month.iloc[0] if (
+                    df is not None and not df.empty and "timestamp" in df.columns
+                ) else None,
+                "day": df["timestamp"].dt.day.iloc[0] if (
+                    df is not None and not df.empty and "timestamp" in df.columns
+                ) else None,
+            }
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown onchain source: {source}")
 
-    if path is None:
-        return {"status": "no_data", "path": None}
-    return {"status": "ok", "path": str(path)}
+        try:
+            path = write_to_parquet(df, base, partitions)
+        except ValueError as ve:
+            raise HTTPException(status_code=422, detail=str(ve))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Write failed: {e}")
+
+        features_written = 0
+        if df is not None and not df.empty:
+            try:
+                features_written = await _write_onchain_features_to_store(df)
+            except Exception as e:
+                logger.warning("On-chain feature write failed", exc_info=e)
+                features_written = 0
+
+        if path is None:
+            return {"status": "no_data", "path": None, "features_written": features_written}
+        return {"status": "ok", "path": str(path), "features_written": features_written}
+
+    except HTTPException:
+        # keep HTTPExceptions as-is (JSON already)
+        raise
+    except Exception as e:
+        logger.exception("ingest_onchain failed")
+        # force JSON on any unhandled error
+        raise HTTPException(status_code=500, detail=f"ingest_onchain failed: {e}")
+
 
 # ---------------------------
 # Social Ingest (POST)
 # ---------------------------
-
 @router.post("/social/{platform}")
 async def ingest_social(platform: str, body: SocialIngestRequest):
-    platform_l = platform.lower()
-    if platform_l == "twitter":
-        df = await fetch_twitter_sentiment(body.query, body.since, body.until, body.max_results)
-        base = settings.SOCIAL_PATH + "/twitter"
-    elif platform_l == "reddit":
-        df = await fetch_reddit_api(body.query, body.since, body.until, body.max_results)
-        base = settings.SOCIAL_PATH + "/reddit"
-    else:
-        raise HTTPException(status_code=400, detail=f"Unknown social platform: {platform}")
-
-    # Light normalization passthrough (adapters mostly normalized already)
-    if not df.empty:
-        df["source"] = platform_l
-        if "author" in df.columns and "user" not in df.columns:
-            df["user"] = df["author"]
-        if "content" in df.columns and "text" not in df.columns:
-            df["text"] = df["content"]
-        elif "selftext" in df.columns and "text" not in df.columns:
-            df["text"] = df["selftext"]
-        if "sentiment_score" not in df.columns:
-            df["sentiment_score"] = None
-
-    partitions = {
-        "query": body.query.replace(" ", "_"),
-        "year": df["ts"].dt.year.iloc[0] if not df.empty and "ts" in df.columns else None,
-        "month": df["ts"].dt.month.iloc[0] if not df.empty and "ts" in df.columns else None,
-        "day": df["ts"].dt.day.iloc[0] if not df.empty and "ts" in df.columns else None,
-    }
-
     try:
-        path = write_to_parquet(df, base, partitions)
-    except ValueError as ve:
-        raise HTTPException(status_code=422, detail=str(ve))
+        platform_l = platform.lower()
+
+        # ---- Normalize time window (since/until can be omitted) ----
+        now = datetime.now(timezone.utc)
+        until = body.until or now
+        since = body.since or (until - timedelta(hours=24))
+        if since >= until:
+            raise HTTPException(status_code=422, detail="'since' must be earlier than 'until'")
+
+        # ---- Fetch ----
+        try:
+            if platform_l == "twitter":
+                df = await _resolve(fetch_twitter_sentiment(body.query, since, until, body.max_results))
+                try:
+                    df = _ensure_utc_col(df, "ts")
+                except Exception as norm_err:
+                    logger.warning("UTC normalize failed for social/twitter; falling back via epoch: %s", norm_err)
+                    df = _force_epoch_then_utc(df, "ts")
+                base = getattr(settings, "SOCIAL_PATH", "/app/data_lake/social") + "/twitter"
+            elif platform_l == "reddit":
+                df = await _resolve(fetch_reddit_api(body.query, since, until, body.max_results))
+                try:
+                    df = _ensure_utc_col(df, "ts")
+                except Exception as norm_err:
+                    logger.warning("UTC normalize failed for social/twitter; falling back via epoch: %s", norm_err)
+                    df = _force_epoch_then_utc(df, "ts")
+                base = getattr(settings, "SOCIAL_PATH", "/app/data_lake/social") + "/reddit"
+            else:
+                raise HTTPException(status_code=400, detail=f"Unknown social platform: {platform}")
+        except Exception as e:
+            # Always return JSON on adapter fetch failures
+            raise HTTPException(status_code=502, detail=f"{platform_l} fetch failed: {e}")
+
+        # ---- Light normalization passthrough ----
+        if df is not None and not df.empty:
+            df["source"] = platform_l
+            if "author" in df.columns and "user" not in df.columns:
+                df["user"] = df["author"]
+            if "text" not in df.columns:
+                if "content" in df.columns:
+                    df["text"] = df["content"]
+                elif "selftext" in df.columns:
+                    df["text"] = df["selftext"]
+            if "sentiment_score" not in df.columns:
+                df["sentiment_score"] = None
+
+        partitions = {
+            "query": body.query.replace(" ", "_"),
+            "year": df["ts"].dt.year.iloc[0] if (df is not None and not df.empty and "ts" in df.columns) else None,
+            "month": df["ts"].dt.month.iloc[0] if (df is not None and not df.empty and "ts" in df.columns) else None,
+            "day": df["ts"].dt.day.iloc[0] if (df is not None and not df.empty and "ts" in df.columns) else None,
+        }
+
+        try:
+            path = write_to_parquet(df, base, partitions)
+        except ValueError as ve:
+            raise HTTPException(status_code=422, detail=str(ve))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Write failed: {e}")
+
+        features_written = 0
+        if df is not None and not df.empty:
+            try:
+                features_written = await _write_social_features_to_store(df)
+            except Exception as e:
+                logger.warning("Social feature write failed", exc_info=e)
+                features_written = 0
+
+        if path is None:
+            return {"status": "no_data", "path": None, "features_written": features_written}
+        return {"status": "ok", "path": str(path), "features_written": features_written}
+
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Write failed: {e}")
-
-    if path is None:
-        return {"status": "no_data", "path": None}
-    return {"status": "ok", "path": str(path)}
-
+        logger.exception("ingest_social failed")
+        raise HTTPException(status_code=500, detail=f"ingest_social failed: {e}")
 # ---------------------------
 # News Ingest (POST)
 # ---------------------------
@@ -467,7 +603,7 @@ async def get_market_features(
     symbol: str,
     timeframe: str,
     ts: List[int] = Query(..., description="Repeat per epoch-second"),
-    store: RedisFeatureStore = Depends(get_store),
+    store: RedisFeatureStore = Depends(provide_store),
 ):
     """
     Retrieve market features from Redis by (symbol, timeframe, ts...).
@@ -483,6 +619,43 @@ async def get_market_features(
         safe_payload = _clean_numbers(payload)
         data.append({"timestamp": int(t), **safe_payload})
 
+    return {"rows": len(data), "data": data}
+
+@router.get("/features/onchain")
+async def get_onchain_features(
+    symbol: str,
+    metric: str,
+    ts: List[int] = Query(..., description="Repeat per epoch-second"),
+    store: RedisFeatureStore = Depends(provide_store),
+):
+    items = [("onchain", symbol, metric, t) for t in ts]
+    vals = await store.batch_read(items)
+
+    data: List[dict] = []
+    for t, payload in zip(ts, vals):
+        if payload is None:
+            continue
+        safe_payload = _clean_numbers(payload)
+        data.append({"timestamp": int(t), **safe_payload})
+    return {"rows": len(data), "data": data}
+
+
+@router.get("/features/social")
+async def get_social_features(
+    topic: str = Query("twitter", description="Symbol/topic; default twitter"),
+    timeframe: str = Query("1m"),
+    ts: List[int] = Query(..., description="Repeat per epoch-second"),
+    store: RedisFeatureStore = Depends(provide_store),
+):
+    items = [("social", topic, timeframe, t) for t in ts]
+    vals = await store.batch_read(items)
+
+    data: List[dict] = []
+    for t, payload in zip(ts, vals):
+        if payload is None:
+            continue
+        safe_payload = _clean_numbers(payload)
+        data.append({"timestamp": int(t), **safe_payload})
     return {"rows": len(data), "data": data}
 
 # ---------------------------
@@ -524,21 +697,114 @@ async def _write_market_features_to_store(df: pd.DataFrame) -> int:
     await store.batch_write(items)
     return len(items)
 
+async def _write_onchain_features_to_store(df: pd.DataFrame) -> int:
+    """Write on-chain features to Redis under domain 'onchain'.
+    Expects columns: ['timestamp','symbol','metric','value'] (timestamp tz-aware UTC).
+    Returns number of rows written.
+    """
+    if df is None or df.empty:
+        return 0
+    required = {"timestamp", "symbol", "metric", "value"}
+    missing = required - set(df.columns)
+    if missing:
+        logger.warning("onchain features missing columns: %s", sorted(missing))
+        return 0
+
+    items = []
+    for _, r in df.iterrows():
+        payload = {
+            "metric": str(r["metric"]),
+            "value": float(r["value"]) if pd.notna(r["value"]) else None,
+        }
+        items.append({
+            "domain": "onchain",
+            "symbol": str(r["symbol"]),
+            "timeframe": str(r["metric"]),
+            "ts": _epoch_s_from_ts(r["timestamp"]),  # <-- was r["timestamp"]
+            "payload": payload,
+        })
+    if not items:
+        return 0
+
+    store = get_store()
+    await store.batch_write(items)
+    return len(items)
+
+
+async def _write_social_features_to_store(df: pd.DataFrame) -> int:
+    """Write social features to Redis under domain 'social'.
+    Expects columns: ['ts','user' or 'author','text' or ('content'/'selftext'),'sentiment_score'] with tz-aware 'ts'.
+    Returns number of rows written.
+    """
+    if df is None or df.empty:
+        return 0
+
+    df = df.copy()
+    if "user" not in df.columns and "author" in df.columns:
+        df["user"] = df["author"]
+    if "text" not in df.columns:
+        if "content" in df.columns:
+            df["text"] = df["content"]
+        elif "selftext" in df.columns:
+            df["text"] = df["selftext"]
+
+    required = {"ts", "user", "text", "sentiment_score"}
+    missing = required - set(df.columns)
+    if missing:
+        logger.warning("social features missing columns: %s", sorted(missing))
+        return 0
+
+    items = []
+    for _, r in df.iterrows():
+        payload = {
+            "user": None if pd.isna(r.get("user")) else str(r.get("user")),
+            "text": None if pd.isna(r.get("text")) else str(r.get("text")),
+            "sentiment": None if pd.isna(r.get("sentiment_score")) else float(r.get("sentiment_score")),
+        }
+        items.append({
+            "domain": "social",
+            "symbol": str(r.get("symbol", r.get("topic", "twitter"))),
+            "timeframe": str(r.get("timeframe", "1m")),
+            "ts": _epoch_s_from_ts(r["ts"]),  # <-- was r["ts"]
+            "payload": payload,
+        })
+    if not items:
+        return 0
+
+    store = get_store()
+    await store.batch_write(items)
+    return len(items)
+
 # --- Admin guard via header token ---
 _admin_hdr = APIKeyHeader(name="X-Admin-Token", auto_error=False)
+_api_key_hdr = APIKeyHeader(name="X-API-Key", auto_error=False)
+_auth_hdr = APIKeyHeader(name="Authorization", auto_error=False)
 
-def require_admin(token: Optional[str] = Security(_admin_hdr)):
+def require_admin(
+    admin_token: Optional[str] = Security(_admin_hdr),
+    api_key: Optional[str] = Security(_api_key_hdr),
+    auth: Optional[str] = Security(_auth_hdr),
+):
     expected = getattr(settings, "ADMIN_TOKEN", None)
-    # Dev-friendly default: if no ADMIN_TOKEN is set, allow (but warn).
-    # Set ADMIN_TOKEN in prod to enforce.
+    # Enforce token presence in non-dev environments
     if not expected:
-        logger.warning("ADMIN_TOKEN not set; admin endpoints are not protected")
-        return True
-    if token == expected:
+        raise HTTPException(status_code=503, detail="Admin token not configured")
+
+    # Determine provided token from supported headers
+    provided = admin_token or api_key
+    if not provided and auth:
+        parts = auth.split(" ", 1)
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            provided = parts[1].strip()
+
+    if provided == expected:
         return True
     raise HTTPException(status_code=401, detail="Admin token required")
 
-@router.post("/admin/backfill/market", dependencies=[Depends(require_admin)])
+# Admin sub-router protected globally
+admin = APIRouter(prefix="/admin", dependencies=[Depends(require_admin)])
+
+@admin.post("/backfill/market")
 async def admin_backfill_market(
     exchange: str = "binance",
     symbol: str = Query(..., description="e.g. BTC/USDT"),
@@ -557,7 +823,7 @@ async def admin_backfill_market(
     return result
 
 
-@router.post("/admin/features/ttl-sweep", dependencies=[Depends(require_admin)])
+@admin.post("/features/ttl-sweep")
 async def admin_ttl_sweep(
     pattern: str = Query("features:market:*"),
     ttl_default: Optional[int] = Query(None, description="Seconds to apply when no TTL is set"),
@@ -568,3 +834,5 @@ async def admin_ttl_sweep(
     """
     result = await ttl_sweep_once(pattern=pattern, ttl_default=ttl_default, max_keys=max_keys)
     return result
+
+router.include_router(admin)

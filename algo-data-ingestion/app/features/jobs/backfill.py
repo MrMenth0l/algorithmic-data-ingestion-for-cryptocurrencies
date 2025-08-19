@@ -1,10 +1,9 @@
 # app/features/jobs/backfill.py
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from typing import List, Tuple, Optional, Dict, Any
 
 import pandas as pd
@@ -12,6 +11,7 @@ import pandas as pd
 from app.features.store.redis_store import get_store, RedisFeatureStore
 from app.features.factory.market_factory import build_market_features
 from app.features.ingestion.ccxt_client import CCXTClient
+from app.features.backfill.core import backfill_market as core_backfill_market
 
 logger = logging.getLogger(__name__)
 
@@ -133,11 +133,6 @@ async def backfill_market_once(
         # Filter to the timestamps we care about (align by floored second)
         step = timeframe_to_seconds(timeframe)
 
-        def align_floor(ts):
-            if pd.api.types.is_datetime64_any_dtype(ts):
-                return int(ts.value // 10**9 // step * step)
-            return int(pd.Timestamp(ts, tz="UTC").value // 10**9 // step * step)
-
         if not df.empty and "timestamp" in df.columns:
             df = df.copy()
             # Ensure tz-aware UTC
@@ -156,6 +151,39 @@ async def backfill_market_once(
         "exchange": exchange,
         "expected": len(plan.expected_ts),
         "missing_before": len(plan.missing_ts),
+        "written": written,
+    }
+
+
+async def backfill_market_parquet(
+    *,
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    start: date,
+    end: date,
+    limit_files: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Parquet-driven backfill that reuses the shared core implementation.
+
+    Returns:
+        dict with keys: exchange, symbol, timeframe, files_scanned, rows_in, written
+    """
+    files_scanned, rows_in, written = await core_backfill_market(
+        exchange=exchange,
+        symbol=symbol,
+        timeframe=timeframe,
+        start=start,
+        end=end,
+        limit_files=limit_files,
+    )
+    return {
+        "exchange": exchange,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "files_scanned": files_scanned,
+        "rows_in": rows_in,
         "written": written,
     }
 
@@ -185,3 +213,14 @@ async def ttl_sweep_once(
             break
 
     return {"pattern": pattern, "scanned": scanned, "ttl_set": fixed}
+
+__all__ = (
+    "BackfillPlan",
+    "plan_missing_market_keys",
+    "build_and_write_market_features",
+    "backfill_market_once",
+    "backfill_market_parquet",
+    "ttl_sweep_once",
+    "timeframe_to_seconds",
+    "floor_epoch",
+)

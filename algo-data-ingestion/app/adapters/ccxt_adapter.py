@@ -7,20 +7,51 @@ import pandas as pd
 from datetime import datetime
 import logging
 from app.common.time_norm import to_utc_dt, add_dt_partition, coerce_schema
+from typing import Union
+
+
+def _since_to_millis(since: Optional[Union[int, float, datetime]]) -> Optional[int]:
+    """Convert various `since` representations to milliseconds since epoch.
+
+    Accepts None, seconds (int/float), milliseconds (int >= 1e12), or datetime.
+    Returns None if input is None.
+    """
+    if since is None:
+        return None
+    if isinstance(since, (int, float)):
+        val = float(since)
+        # heuristic: treat really large numbers as ms already
+        return int(val if val >= 1e12 else val * 1000)
+    if isinstance(since, datetime):
+        return int(since.timestamp() * 1000)
+    # Last resort: try pandas parsing
+    try:
+        return int(pd.Timestamp(since, tz="UTC").timestamp() * 1000)
+    except Exception:
+        raise TypeError(f"Unsupported type for since: {type(since)!r}")
 
 
 async def _retry_async(func, *args, retries: int = 3, backoff_factor: float = 1.0, **kwargs):
+    """Retry an async callable with exponential backoff.
+
+    Args:
+        func: async function/coroutine to call
+        retries: total attempts (including the first)
+        backoff_factor: base backoff seconds (exponential)
+    """
     for attempt in range(1, retries + 1):
         try:
             return await func(*args, **kwargs)
         except Exception as e:
             try:
-                logger.warning(f"CCXT call {func.__name__} failed on attempt {attempt}/{retries}: {e}")
+                logger.warning(
+                    f"CCXT call {getattr(func, '__name__', str(func))} failed on attempt {attempt}/{retries}: {e}"
+                )
             except Exception:
                 pass
             if attempt < retries:
-                await asyncio.sleep(backoff_factor * 2 ** (attempt - 1))
-    # Last attempt
+                await asyncio.sleep(backoff_factor * (2 ** (attempt - 1)))
+    # last attempt; let exception propagate if it fails
     return await func(*args, **kwargs)
 
 logger = logging.getLogger("app.adapters.ccxt_adapter")
@@ -47,18 +78,15 @@ class CCXTAdapter:
         self,
         symbol: str,
         timeframe: str,
-        since: Optional[datetime] = None,
-        limit: int = None
+        since: Optional[Any] = None,
+        limit: int = None,
     ) -> pd.DataFrame:
         """
         Fetch OHLCV bars for a symbol.
         Returns a DataFrame with columns [timestamp, open, high, low, close, volume].
         """
-        if since is not None:
-            since_ms = int(since.timestamp() * 1000)
-            ohlcv = await _retry_async(self.client.fetch_ohlcv, symbol, timeframe, since_ms, limit)
-        else:
-            ohlcv = await _retry_async(self.client.fetch_ohlcv, symbol, timeframe, None, limit)
+        since_ms = _since_to_millis(since)
+        ohlcv = await _retry_async(self.client.fetch_ohlcv, symbol, timeframe, since_ms, limit)
         df = pd.DataFrame(ohlcv, columns=[
             'timestamp', 'open', 'high', 'low', 'close', 'volume'
         ])
