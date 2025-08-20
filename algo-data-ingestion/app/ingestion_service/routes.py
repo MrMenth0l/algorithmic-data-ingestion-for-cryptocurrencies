@@ -658,6 +658,70 @@ async def get_social_features(
         data.append({"timestamp": int(t), **safe_payload})
     return {"rows": len(data), "data": data}
 
+# ---- Feature range retrieval (via ZSET index) ----
+
+@router.get("/features/market/range")
+async def get_market_features_range(
+    symbol: str,
+    timeframe: str,
+    start: int,  # epoch seconds (inclusive)
+    end: int,    # epoch seconds (inclusive)
+    limit: int = 500,
+    reverse: bool = False,
+    store: RedisFeatureStore = Depends(get_store),
+):
+    rows = await store.range_read(
+        domain="market", symbol=symbol, timeframe=timeframe,
+        start=int(start), end=int(end), limit=limit, reverse=reverse,
+    )
+    safe = [_clean_numbers(r) for r in rows]
+    return {"rows": len(safe), "data": safe}
+
+
+@router.get("/features/onchain/range", name="features_onchain_range")
+async def get_onchain_features_range(
+    symbol: str,
+    timeframe: str = Query("1d"),
+    start: int = Query(..., description="epoch seconds"),
+    end: int = Query(..., description="epoch seconds"),
+    limit: int = 500,
+    reverse: bool = False,
+    store: RedisFeatureStore = Depends(provide_store),
+):
+    rows = await store.range_read(
+        domain="onchain",
+        symbol=symbol,
+        timeframe=timeframe,
+        start=int(start),
+        end=int(end),
+        limit=limit,
+        reverse=reverse,
+    )
+    safe = [_clean_numbers(r) for r in rows]
+    return {"rows": len(safe), "data": safe}
+
+@router.get("/features/social/range", name="features_social_range")
+async def get_social_features_range(
+    topic: str = Query("twitter"),
+    timeframe: str = Query("1m"),
+    start: int = Query(..., description="epoch seconds"),
+    end: int = Query(..., description="epoch seconds"),
+    limit: int = 500,
+    reverse: bool = False,
+    store: RedisFeatureStore = Depends(provide_store),
+):
+    rows = await store.range_read(
+        domain="social",
+        symbol=topic,
+        timeframe=timeframe,
+        start=int(start),
+        end=int(end),
+        limit=limit,
+        reverse=reverse,
+    )
+    safe = [_clean_numbers(r) for r in rows]
+    return {"rows": len(safe), "data": safe}
+
 # ---------------------------
 # Internal: build & write features
 # ---------------------------
@@ -719,10 +783,11 @@ async def _write_onchain_features_to_store(df: pd.DataFrame) -> int:
         items.append({
             "domain": "onchain",
             "symbol": str(r["symbol"]),
-            "timeframe": str(r["metric"]),
-            "ts": _epoch_s_from_ts(r["timestamp"]),  # <-- was r["timestamp"]
+            "timeframe": "1d",  # <-- fixed bucket; metric stays in payload
+            "ts": _epoch_s_from_ts(r["timestamp"]),
             "payload": payload,
         })
+
     if not items:
         return 0
 

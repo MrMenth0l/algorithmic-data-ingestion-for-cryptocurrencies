@@ -107,6 +107,16 @@ class RedisFeatureStore:
         sym = _safe_symbol(symbol)
         return f"{self._namespace}:{dom}:{sym}:{tf}:{int(epoch_s)}"
 
+    def _index_key(self, domain: str, symbol: str, timeframe: str) -> str:
+        """
+        Per-(domain,symbol,timeframe) sorted index for range queries.
+        Members are feature keys, score is epoch seconds.
+        """
+        dom = (domain or "").strip().lower()
+        tf = (timeframe or "").strip().lower()
+        sym = _safe_symbol(symbol)
+        return f"{self._namespace}:{dom}:{sym}:{tf}:_idx"
+
     def _ensure_client(self) -> aioredis.Redis:
         if self._client is None:
             self._client = aioredis.from_url(
@@ -177,6 +187,9 @@ class RedisFeatureStore:
                 payload = json.dumps(it["payload"], default=str)
                 # IMPORTANT: do NOT `await` individual pipeline commands
                 pipe.set(key, payload, ex=ttl or self._default_ttl)
+                # Maintain time index for range queries
+                idx = self._index_key(domain, symbol, timeframe)
+                pipe.zadd(idx, {key: float(epoch_s)})
                 FEATURE_WRITES_TOTAL.labels(domain=domain).inc()
             await pipe.execute()
         FEATURE_OP_LATENCY.labels(op="batch_write").observe(time.perf_counter() - start)
@@ -204,6 +217,46 @@ class RedisFeatureStore:
                 out.append(json.loads(raw))
         FEATURE_OP_LATENCY.labels(op="batch_read").observe(time.perf_counter() - start)
         return out
+
+    async def range_read(
+        self,
+        *,
+        domain: str,
+        symbol: str,
+        timeframe: str,
+        start: int,
+        end: int,
+        limit: int = 200,
+        reverse: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Return list of payload dicts for keys in [start,end] (epoch seconds).
+
+        Uses a per-(domain,symbol,timeframe) ZSET index whose score is epoch seconds
+        and whose member is the full feature key.
+        """
+        t0 = time.perf_counter()
+        client = self._ensure_client()
+        idx = self._index_key(domain, symbol, timeframe)
+        try:
+            # fetch matching keys from sorted index
+            if reverse:
+                key_list = await client.zrevrangebyscore(idx, end, start, start=0, num=limit)
+            else:
+                key_list = await client.zrangebyscore(idx, start, end, start=0, num=limit)
+            if not key_list:
+                return []
+            raw_list = await client.mget(key_list)
+            out: List[Dict[str, Any]] = []
+            for raw in raw_list:
+                if not raw:
+                    continue
+                try:
+                    out.append(json.loads(raw))
+                except Exception:
+                    continue
+            return out
+        finally:
+            FEATURE_OP_LATENCY.labels(op="range_read").observe(time.perf_counter() - t0)
 
     async def aclose(self) -> None:
         if self._client is not None:
