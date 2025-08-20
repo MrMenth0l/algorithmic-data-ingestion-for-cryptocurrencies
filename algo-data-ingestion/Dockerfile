@@ -40,6 +40,9 @@ RUN pip install --no-cache-dir \
     numpy \
     numba \
     feedparser \
+    APScheduler==3.10.4 \
+    pytz \
+    tzlocal \
     sentence-transformers \
     transformers \
     torch

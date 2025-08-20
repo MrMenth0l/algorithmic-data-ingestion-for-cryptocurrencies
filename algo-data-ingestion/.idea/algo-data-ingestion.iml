@@ -5,6 +5,12 @@
       <sourceFolder url="file://$MODULE_DIR$/app" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/data_lake/market/exchange=binance/symbol=BTC-USDT" />
+      <excludeFolder url="file://$MODULE_DIR$/tests/data_lake/market/exchange=binance/symbol=BTC-USDT/year=2025/month=8/day=1/dt=2025-08-01" />
+      <excludeFolder url="file://$MODULE_DIR$/tests/data_lake/market/exchange=binance/symbol=BTC-USDT/year=2025/month=8/day=19" />
+      <excludeFolder url="file://$MODULE_DIR$/tests/data_lake/market/exchange=binance/symbol=BTC-USDT/year=2025/month=8/day=20" />
+      <excludeFolder url="file://$MODULE_DIR$/tests/data_lake/onchain/glassnode/symbol=BTC/metric=active_addresses" />
+      <excludeFolder url="file://$MODULE_DIR$/tests/data_lake/social/twitter/query=bitcoin" />
     </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />

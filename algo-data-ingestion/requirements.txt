@@ -1,0 +1,43 @@
+# ---- Optional extra index for CPU PyTorch wheels (Linux x86_64) ----
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# --- Web API ---
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.27
+
+# --- Config / settings ---
+pydantic>=2.4
+pydantic-settings>=2.2
+
+# --- Async + HTTP ---
+httpx>=0.24.1
+tenacity>=8.2.3
+
+# --- Redis (async) ---
+redis>=5.0.1
+
+# --- Metrics ---
+prometheus-client>=0.20.0
+
+# --- Data wrangling + parquet ---
+pandas>=2.2.0
+numpy>=1.26.0
+pyarrow>=15.0.0
+
+# --- Exchanges (async CCXT) ---
+ccxt>=4.3.0
+
+# --- Scheduler service ---
+APScheduler==3.10.4
+pytz>=2023.3
+tzlocal>=5.2
+
+# --- RSS / News utilities ---
+feedparser>=6.0.10
+
+# --- WebSocket support (Starlette pulls this, but keep explicit) ---
+websockets>=12.0
+
+# --- ML (sentiment adapter) ---
+transformers>=4.41.0
+torch==2.3.1+cpu
