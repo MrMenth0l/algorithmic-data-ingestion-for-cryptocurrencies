@@ -3,7 +3,6 @@ import asyncio
 from prometheus_client import make_asgi_app
 from fastapi.middleware.cors import CORSMiddleware
 import logging
-from app.ingestion_service.utils import _METRICS_REGISTRY
 from app.ingestion_service.config import settings
 from app.features.jobs.backfill import backfill_market_once, ttl_sweep_once
 from contextlib import asynccontextmanager
