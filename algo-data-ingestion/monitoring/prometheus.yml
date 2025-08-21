@@ -27,5 +27,10 @@ scrape_configs:
         labels:
           service: redis
 
+  # Scheduler metrics via scheduler
+  - job_name: 'scheduler'
+    static_configs:
+      - targets: [ 'scheduler:9002' ]
+
 rule_files:
   - /etc/prometheus/alert.rules.yml

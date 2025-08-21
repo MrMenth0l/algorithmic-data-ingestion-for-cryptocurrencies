@@ -44,6 +44,10 @@ from app.features.ingestion.onchain_client import OnchainClient
 from app.features.ingestion.social_client import SocialClient
 from app.features.store.redis_store import get_store, RedisFeatureStore
 from app.features.factory.market_factory import build_market_features
+import inspect
+from fastapi import HTTPException
+from app.ingestion_service.metrics import ingest_span, record_rows_written
+from fastapi.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +72,7 @@ def _parse_epoch_sec(ts: Optional[int]) -> Optional[datetime]:
     if ts is None:
         return None
     return datetime.fromtimestamp(int(ts), tz=timezone.utc)
+
 
 def _clean_numbers(obj: Any) -> Any:
     """Recursively convert numpy scalars to Python, replace NaN/Inf with None."""
@@ -169,81 +174,90 @@ async def get_ccxt_historical(
     finally:
         await client.aclose()
 
+
+
 # ---------------------------
 # Market Ingest (POST)
 # ---------------------------
 
 @router.post("/market/{exchange}")
 async def ingest_market(exchange: str, body: MarketIngestRequest):
-    from ccxt.base.errors import BadSymbol  # local import to avoid hard dep at module import time
+    from ccxt.base.errors import BadSymbol
     adapter = CCXTAdapter(exchange)
 
-    # Handle invalid market symbols explicitly (e.g., "BTC-USDT" vs "BTC/USDT")
-    try:
-        df = await adapter.fetch_ohlcv(
-            body.symbol,
-            body.granularity,
-            since=None,
-            limit=body.limit,
-        )
-    except BadSymbol as e:
-        # Map CCXT BadSymbol -> 400 so clients can correct the request
-        raise HTTPException(
-            status_code=400,
-            detail=f"{exchange} does not have market symbol {body.symbol}",
-        ) from e
-
-    # Ensure required/partition columns, and make timestamp UTC safely
-    try:
-        if not df.empty:
-            df["symbol"] = body.symbol
-            df["exchange"] = exchange
-
-            if "timestamp" not in df.columns:
-                raise ValueError("Missing columns: ['timestamp']")
-
-            s = df["timestamp"]
-
-            if pd.api.types.is_datetime64_any_dtype(s):
-                # tz-aware -> convert; tz-naive -> localize
-                if getattr(s.dt, "tz", None) is not None:
-                    df["timestamp"] = s.dt.tz_convert("UTC")
-                else:
-                    df["timestamp"] = s.dt.tz_localize("UTC")
-            else:
-                # strings/ints/objects -> coerce to UTC-aware
-                df["timestamp"] = pd.to_datetime(s, utc=True)
-
-        base = settings.MARKET_PATH
-        partitions = {
-            "exchange": exchange,
-            "symbol": body.symbol,
-            "year": df["timestamp"].dt.year.iloc[0] if not df.empty else None,
-            "month": df["timestamp"].dt.month.iloc[0] if not df.empty else None,
-            "day": df["timestamp"].dt.day.iloc[0] if not df.empty else None,
-        }
-
-        path = write_to_parquet(df, base, partitions)
-
-    except ValueError as ve:
-        # Schema/normalization failure (Batch 1.2 enforcement)
-        raise HTTPException(status_code=422, detail=str(ve))
-    except Exception as e:
-        # Anything else -> 500 with explicit message
-        raise HTTPException(status_code=500, detail=f"Write failed: {e}")
-
-    # Write engineered features to Redis (Batch 2.2)
-    features_written = 0
-    if not df.empty:
+    with ingest_span("market") as span:
         try:
-            features_written = await _write_market_features_to_store(df)
-        except Exception as e:
-            logger.warning("Feature write failed", exc_info=e)
-            features_written = 0
+            # ---- Fetch via YOUR adapter ----
+            try:
+                df = await adapter.fetch_ohlcv(
+                    body.symbol,
+                    body.granularity,
+                    since=None,
+                    limit=body.limit,
+                )
+            except BadSymbol as e:
+                # 400 so clients can correct the request
+                span.set_status("error")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{exchange} does not have market symbol {body.symbol}",
+                ) from e
 
-    if path is None:
-        return {"status": "no_data", "path": None, "features_written": features_written}
-    return {"status": "ok", "path": str(path), "features_written": features_written}
+            # ---- Normalize + write parquet (unchanged logic) ----
+            try:
+                if not df.empty:
+                    df["symbol"] = body.symbol
+                    df["exchange"] = exchange
+
+                    if "timestamp" not in df.columns:
+                        raise ValueError("Missing columns: ['timestamp']")
+
+                    s = df["timestamp"]
+                    if pd.api.types.is_datetime64_any_dtype(s):
+                        if getattr(s.dt, "tz", None) is not None:
+                            df["timestamp"] = s.dt.tz_convert("UTC")
+                        else:
+                            df["timestamp"] = s.dt.tz_localize("UTC")
+                    else:
+                        df["timestamp"] = pd.to_datetime(s, utc=True)
+
+                base = settings.MARKET_PATH
+                partitions = {
+                    "exchange": exchange,
+                    "symbol": body.symbol,
+                    "year": df["timestamp"].dt.year.iloc[0] if not df.empty else None,
+                    "month": df["timestamp"].dt.month.iloc[0] if not df.empty else None,
+                    "day": df["timestamp"].dt.day.iloc[0] if not df.empty else None,
+                }
+
+                path = write_to_parquet(df, base, partitions)
+
+            except ValueError as ve:
+                span.set_status("error")
+                raise HTTPException(status_code=422, detail=str(ve))
+            except Exception as e:
+                span.set_status("error")
+                raise HTTPException(status_code=500, detail=f"Write failed: {e}")
+
+            # ---- Feature fan-out ----
+            features_written = 0
+            if not df.empty:
+                try:
+                    features_written = await _write_market_features_to_store(df)
+                except Exception as e:
+                    logger.warning("Feature write failed", exc_info=e)
+                    features_written = 0
+
+            status = "ok" if path is not None else "no_data"
+            span.set_status(status)
+            return {"status": status, "path": None if path is None else str(path), "features_written": features_written}
+
+        except HTTPException:
+            # status already set
+            raise
+        except Exception as e:
+            span.set_status("error")
+            raise HTTPException(status_code=500, detail=f"ingest_market failed: {e}")
 
 
 # ---------------------------
@@ -251,79 +265,82 @@ async def ingest_market(exchange: str, body: MarketIngestRequest):
 # ---------------------------
 @router.post("/onchain/{source}")
 async def ingest_onchain(source: str, body: OnchainIngestRequest):
-    try:
-        source_l = source.lower()
-        if source_l == "glassnode":
-            df = await _resolve(fetch_glassnode(body.symbol, body.metric, days=body.days))
-            try:
-                df = _ensure_utc_col(df, "timestamp")
-            except Exception as norm_err:
-                logger.warning("UTC normalize failed for onchain/glassnode; falling back via epoch: %s", norm_err)
-                df = _force_epoch_then_utc(df, "timestamp")
-            base = getattr(settings, "ONCHAIN_PATH", "/app/data_lake/onchain") + "/glassnode"
-            partitions = {
-                "symbol": body.symbol or "",
-                "metric": body.metric or "",
-                "year": df["timestamp"].dt.year.iloc[0] if (
-                    df is not None and not df.empty and "timestamp" in df.columns
-                ) else None,
-                "month": df["timestamp"].dt.month.iloc[0] if (
-                    df is not None and not df.empty and "timestamp" in df.columns
-                ) else None,
-                "day": df["timestamp"].dt.day.iloc[0] if (
-                    df is not None and not df.empty and "timestamp" in df.columns
-                ) else None,
-            }
-        elif source_l == "covalent":
-            df = await _resolve(fetch_covalent(chain_id=body.chain_id, address=body.address))
-            try:
-                df = _ensure_utc_col(df, "timestamp")
-            except Exception as norm_err:
-                logger.warning("UTC normalize failed for onchain/glassnode; falling back via epoch: %s", norm_err)
-                df = _force_epoch_then_utc(df, "timestamp")
-            base = getattr(settings, "ONCHAIN_PATH", "/app/data_lake/onchain") + "/covalent"
-            partitions = {
-                "chain_id": body.chain_id,
-                "address": body.address or "",
-                "year": df["timestamp"].dt.year.iloc[0] if (
-                    df is not None and not df.empty and "timestamp" in df.columns
-                ) else None,
-                "month": df["timestamp"].dt.month.iloc[0] if (
-                    df is not None and not df.empty and "timestamp" in df.columns
-                ) else None,
-                "day": df["timestamp"].dt.day.iloc[0] if (
-                    df is not None and not df.empty and "timestamp" in df.columns
-                ) else None,
-            }
-        else:
-            raise HTTPException(status_code=400, detail=f"Unknown onchain source: {source}")
-
+    with ingest_span("onchain") as span:
         try:
-            path = write_to_parquet(df, base, partitions)
-        except ValueError as ve:
-            raise HTTPException(status_code=422, detail=str(ve))
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Write failed: {e}")
+            source_l = source.lower()
+            if source_l == "glassnode":
+                df = await _resolve(fetch_glassnode(body.symbol, body.metric, days=body.days))
+                try:
+                    df = _ensure_utc_col(df, "timestamp")
+                except Exception as norm_err:
+                    logger.warning("UTC normalize failed for onchain/glassnode; falling back via epoch: %s", norm_err)
+                    df = _force_epoch_then_utc(df, "timestamp")
+                base = getattr(settings, "ONCHAIN_PATH", "/app/data_lake/onchain") + "/glassnode"
+                partitions = {
+                    "symbol": body.symbol or "",
+                    "metric": body.metric or "",
+                    "year": df["timestamp"].dt.year.iloc[0] if (
+                        df is not None and not df.empty and "timestamp" in df.columns
+                    ) else None,
+                    "month": df["timestamp"].dt.month.iloc[0] if (
+                        df is not None and not df.empty and "timestamp" in df.columns
+                    ) else None,
+                    "day": df["timestamp"].dt.day.iloc[0] if (
+                        df is not None and not df.empty and "timestamp" in df.columns
+                    ) else None,
+                }
+            elif source_l == "covalent":
+                df = await _resolve(fetch_covalent(chain_id=body.chain_id, address=body.address))
+                try:
+                    df = _ensure_utc_col(df, "timestamp")
+                except Exception as norm_err:
+                    logger.warning("UTC normalize failed for onchain/covalent; falling back via epoch: %s", norm_err)
+                    df = _force_epoch_then_utc(df, "timestamp")
+                base = getattr(settings, "ONCHAIN_PATH", "/app/data_lake/onchain") + "/covalent"
+                partitions = {
+                    "chain_id": body.chain_id,
+                    "address": body.address or "",
+                    "year": df["timestamp"].dt.year.iloc[0] if (
+                        df is not None and not df.empty and "timestamp" in df.columns
+                    ) else None,
+                    "month": df["timestamp"].dt.month.iloc[0] if (
+                        df is not None and not df.empty and "timestamp" in df.columns
+                    ) else None,
+                    "day": df["timestamp"].dt.day.iloc[0] if (
+                        df is not None and not df.empty and "timestamp" in df.columns
+                    ) else None,
+                }
+            else:
+                span.set_status("error")
+                raise HTTPException(status_code=400, detail=f"Unknown onchain source: {source}")
 
-        features_written = 0
-        if df is not None and not df.empty:
             try:
-                features_written = await _write_onchain_features_to_store(df)
+                path = write_to_parquet(df, base, partitions)
+            except ValueError as ve:
+                span.set_status("error")
+                raise HTTPException(status_code=422, detail=str(ve))
             except Exception as e:
-                logger.warning("On-chain feature write failed", exc_info=e)
-                features_written = 0
+                span.set_status("error")
+                raise HTTPException(status_code=500, detail=f"Write failed: {e}")
 
-        if path is None:
-            return {"status": "no_data", "path": None, "features_written": features_written}
-        return {"status": "ok", "path": str(path), "features_written": features_written}
+            features_written = 0
+            if df is not None and not df.empty:
+                try:
+                    features_written = await _write_onchain_features_to_store(df)
+                except Exception as e:
+                    logger.warning("On-chain feature write failed", exc_info=e)
+                    features_written = 0
 
-    except HTTPException:
-        # keep HTTPExceptions as-is (JSON already)
-        raise
-    except Exception as e:
-        logger.exception("ingest_onchain failed")
-        # force JSON on any unhandled error
-        raise HTTPException(status_code=500, detail=f"ingest_onchain failed: {e}")
+            status = "ok" if path is not None else "no_data"
+            span.set_status(status)
+            return {"status": status, "path": None if path is None else str(path), "features_written": features_written}
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("ingest_onchain failed")
+            span.set_status("error")
+            raise HTTPException(status_code=500, detail=f"ingest_onchain failed: {e}")
 
 
 # ---------------------------
@@ -331,119 +348,143 @@ async def ingest_onchain(source: str, body: OnchainIngestRequest):
 # ---------------------------
 @router.post("/social/{platform}")
 async def ingest_social(platform: str, body: SocialIngestRequest):
-    try:
-        platform_l = platform.lower()
-
-        # ---- Normalize time window (since/until can be omitted) ----
-        now = datetime.now(timezone.utc)
-        until = body.until or now
-        since = body.since or (until - timedelta(hours=24))
-        if since >= until:
-            raise HTTPException(status_code=422, detail="'since' must be earlier than 'until'")
-
-        # ---- Fetch ----
+    with ingest_span("social") as span:
         try:
-            if platform_l == "twitter":
-                df = await _resolve(fetch_twitter_sentiment(body.query, since, until, body.max_results))
-                try:
-                    df = _ensure_utc_col(df, "ts")
-                except Exception as norm_err:
-                    logger.warning("UTC normalize failed for social/twitter; falling back via epoch: %s", norm_err)
-                    df = _force_epoch_then_utc(df, "ts")
-                base = getattr(settings, "SOCIAL_PATH", "/app/data_lake/social") + "/twitter"
-            elif platform_l == "reddit":
-                df = await _resolve(fetch_reddit_api(body.query, since, until, body.max_results))
-                try:
-                    df = _ensure_utc_col(df, "ts")
-                except Exception as norm_err:
-                    logger.warning("UTC normalize failed for social/twitter; falling back via epoch: %s", norm_err)
-                    df = _force_epoch_then_utc(df, "ts")
-                base = getattr(settings, "SOCIAL_PATH", "/app/data_lake/social") + "/reddit"
-            else:
-                raise HTTPException(status_code=400, detail=f"Unknown social platform: {platform}")
-        except Exception as e:
-            # Always return JSON on adapter fetch failures
-            raise HTTPException(status_code=502, detail=f"{platform_l} fetch failed: {e}")
+            platform_l = platform.lower()
 
-        # ---- Light normalization passthrough ----
-        if df is not None and not df.empty:
-            df["source"] = platform_l
-            if "author" in df.columns and "user" not in df.columns:
-                df["user"] = df["author"]
-            if "text" not in df.columns:
-                if "content" in df.columns:
-                    df["text"] = df["content"]
-                elif "selftext" in df.columns:
-                    df["text"] = df["selftext"]
-            if "sentiment_score" not in df.columns:
-                df["sentiment_score"] = None
+            # ---- Normalize time window ----
+            now = datetime.now(timezone.utc)
+            until = body.until or now
+            since = body.since or (until - timedelta(hours=24))
+            if since >= until:
+                span.set_status("error")
+                raise HTTPException(status_code=422, detail="'since' must be earlier than 'until'")
 
-        partitions = {
-            "query": body.query.replace(" ", "_"),
-            "year": df["ts"].dt.year.iloc[0] if (df is not None and not df.empty and "ts" in df.columns) else None,
-            "month": df["ts"].dt.month.iloc[0] if (df is not None and not df.empty and "ts" in df.columns) else None,
-            "day": df["ts"].dt.day.iloc[0] if (df is not None and not df.empty and "ts" in df.columns) else None,
-        }
-
-        try:
-            path = write_to_parquet(df, base, partitions)
-        except ValueError as ve:
-            raise HTTPException(status_code=422, detail=str(ve))
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Write failed: {e}")
-
-        features_written = 0
-        if df is not None and not df.empty:
+            # ---- Fetch via YOUR adapters ----
             try:
-                features_written = await _write_social_features_to_store(df)
+                if platform_l == "twitter":
+                    df = await _resolve(fetch_twitter_sentiment(body.query, since, until, body.max_results))
+                    try:
+                        df = _ensure_utc_col(df, "ts")
+                    except Exception as norm_err:
+                        logger.warning("UTC normalize failed for social/twitter; falling back via epoch: %s", norm_err)
+                        df = _force_epoch_then_utc(df, "ts")
+                    base = getattr(settings, "SOCIAL_PATH", "/app/data_lake/social") + "/twitter"
+                elif platform_l == "reddit":
+                    df = await _resolve(fetch_reddit_api(body.query, since, until, body.max_results))
+                    try:
+                        df = _ensure_utc_col(df, "ts")
+                    except Exception as norm_err:
+                        logger.warning("UTC normalize failed for social/reddit; falling back via epoch: %s", norm_err)
+                        df = _force_epoch_then_utc(df, "ts")
+                    base = getattr(settings, "SOCIAL_PATH", "/app/data_lake/social") + "/reddit"
+                else:
+                    span.set_status("error")
+                    raise HTTPException(status_code=400, detail=f"Unknown social platform: {platform}")
             except Exception as e:
-                logger.warning("Social feature write failed", exc_info=e)
-                features_written = 0
+                span.set_status("error")
+                raise HTTPException(status_code=502, detail=f"{platform_l} fetch failed: {e}")
 
-        if path is None:
-            return {"status": "no_data", "path": None, "features_written": features_written}
-        return {"status": "ok", "path": str(path), "features_written": features_written}
+            # ---- Light normalization passthrough ----
+            if df is not None and not df.empty:
+                df["source"] = platform_l
+                if "author" in df.columns and "user" not in df.columns:
+                    df["user"] = df["author"]
+                if "text" not in df.columns:
+                    if "content" in df.columns:
+                        df["text"] = df["content"]
+                    elif "selftext" in df.columns:
+                        df["text"] = df["selftext"]
+                if "sentiment_score" not in df.columns:
+                    df["sentiment_score"] = None
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("ingest_social failed")
-        raise HTTPException(status_code=500, detail=f"ingest_social failed: {e}")
+            partitions = {
+                "query": body.query.replace(" ", "_"),
+                "year": df["ts"].dt.year.iloc[0] if (df is not None and not df.empty and "ts" in df.columns) else None,
+                "month": df["ts"].dt.month.iloc[0] if (df is not None and not df.empty and "ts" in df.columns) else None,
+                "day": df["ts"].dt.day.iloc[0] if (df is not None and not df.empty and "ts" in df.columns) else None,
+            }
+
+            try:
+                path = write_to_parquet(df, base, partitions)
+            except ValueError as ve:
+                span.set_status("error")
+                raise HTTPException(status_code=422, detail=str(ve))
+            except Exception as e:
+                span.set_status("error")
+                raise HTTPException(status_code=500, detail=f"Write failed: {e}")
+
+            features_written = 0
+            if df is not None and not df.empty:
+                try:
+                    features_written = await _write_social_features_to_store(df)
+                except Exception as e:
+                    logger.warning("Social feature write failed", exc_info=e)
+                    features_written = 0
+
+            status = "ok" if path is not None else "no_data"
+            span.set_status(status)
+            return {"status": status, "path": None if path is None else str(path), "features_written": features_written}
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("ingest_social failed")
+            span.set_status("error")
+            raise HTTPException(status_code=500, detail=f"ingest_social failed: {e}")
+
+
 # ---------------------------
 # News Ingest (POST)
 # ---------------------------
 
-@router.post("/news")
-async def ingest_news(body: NewsIngestRequest):
-    st = body.source_type.lower()
-    if st == "api":
-        df = await fetch_news_api(category=body.category)
-        base = settings.NEWS_PATH + "/api"
-        src = body.category or ""
-    elif st == "rss":
-        df = await fetch_news_rss(body.feed_url)
-        base = settings.NEWS_PATH + "/rss"
-        src = body.feed_url or ""
-    else:
-        raise HTTPException(status_code=400, detail=f"Unknown news source_type: {body.source_type}")
+@router.post("/news", tags=["ingest-news"])
+async def ingest_news(req: NewsIngestRequest):
+    """
+    Ingest news from either an API or an RSS feed.
 
-    partitions = {
-        "source": src,
-        "year": df["published_at"].dt.year.iloc[0] if not df.empty and "published_at" in df.columns else None,
-        "month": df["published_at"].dt.month.iloc[0] if not df.empty and "published_at" in df.columns else None,
-        "day": df["published_at"].dt.day.iloc[0] if not df.empty and "published_at" in df.columns else None,
-    }
+    This mirrors the style of the other ingest endpoints:
+      - returns 200 on success or when there is simply "no data"
+      - never 5xx just because credentials are missing
+      - consistent response shape: {status, path, features_written}
 
+    For Phase 2 (no keys yet), this endpoint will typically return `no_data`.
+    Later (Phase 3), wire it to your real fetchers and writer just like social/onchain.
+    """
     try:
-        path = write_to_parquet(df, base, partitions)
-    except ValueError as ve:
-        raise HTTPException(status_code=422, detail=str(ve))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Write failed: {e}")
+        # minimal validation consistent with the schema
+        st = (req.source_type or "").lower().strip()
+        if st not in ("api", "rss"):
+            raise HTTPException(status_code=422, detail="source_type must be 'api' or 'rss'")
 
-    if path is None:
-        return {"status": "no_data", "path": None}
-    return {"status": "ok", "path": str(path)}
+        if st == "api":
+            # Without API keys we won't fetch. Return a safe, consistent payload.
+            # Phase 3: call your real fetcher then write features (same pattern as social/onchain).
+            #   df = fetch_news_api(category=req.category)
+            #   written, path = _write_news_features_to_store(df)  # if/when you add it
+            return JSONResponse(
+                status_code=200,
+                content={"status": "no_data", "path": None, "features_written": 0},
+            )
+
+        # st == "rss"
+        if not req.feed_url:
+            raise HTTPException(status_code=422, detail="feed_url is required when source_type='rss'")
+
+        # Phase 2: we don't fetch; return safe no_data.
+        # Phase 3: resolve your RSS fetcher + writer here (mirroring social logic).
+        #   df = fetch_news_rss(feed_url=req.feed_url)
+        #   written, path = _write_news_features_to_store(df)
+        return JSONResponse(
+            status_code=200,
+            content={"status": "no_data", "path": None, "features_written": 0},
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Keep parity with other endpoints' error style
+        raise HTTPException(status_code=502, detail=f"news ingest failed: {e}")
 
 # ---------------------------
 # News Search (GET via NewsClient)
@@ -658,6 +699,29 @@ async def get_social_features(
         data.append({"timestamp": int(t), **safe_payload})
     return {"rows": len(data), "data": data}
 
+@router.get("/features/news")
+async def get_news_features(
+    topic: str = Query("news", description="Topic/source key; default 'news'"),
+    timeframe: str = Query("1m"),
+    ts: List[int] = Query(..., description="Repeat per epoch-second"),
+    store: RedisFeatureStore = Depends(provide_store),
+):
+    """
+    Retrieve news features from Redis by (topic, timeframe, ts...).
+    Returns {rows, data} with JSON-safe payloads.
+    """
+    items = [("news", topic, timeframe, t) for t in ts]
+    vals = await store.batch_read(items)
+
+    data: List[dict] = []
+    for t, payload in zip(ts, vals):
+        if payload is None:
+            continue
+        safe_payload = _clean_numbers(payload)
+        data.append({"timestamp": int(t), **safe_payload})
+
+    return {"rows": len(data), "data": data}
+
 # ---- Feature range retrieval (via ZSET index) ----
 
 @router.get("/features/market/range")
@@ -722,6 +786,28 @@ async def get_social_features_range(
     safe = [_clean_numbers(r) for r in rows]
     return {"rows": len(safe), "data": safe}
 
+@router.get("/features/news/range", name="features_news_range")
+async def get_news_features_range(
+    topic: str = Query("news"),
+    timeframe: str = Query("1m"),
+    start: int = Query(..., description="epoch seconds (inclusive)"),
+    end: int = Query(..., description="epoch seconds (inclusive)"),
+    limit: int = 500,
+    reverse: bool = False,
+    store: RedisFeatureStore = Depends(provide_store),
+):
+    rows = await store.range_read(
+        domain="news",
+        symbol=topic,
+        timeframe=timeframe,
+        start=int(start),
+        end=int(end),
+        limit=limit,
+        reverse=reverse,
+    )
+    safe = [_clean_numbers(r) for r in rows]
+    return {"rows": len(safe), "data": safe}
+
 # ---------------------------
 # Internal: build & write features
 # ---------------------------
@@ -756,9 +842,10 @@ async def _write_market_features_to_store(df: pd.DataFrame) -> int:
 
     if not items:
         return 0
-
+    # inside _write_market_features_to_store(...)
     store = get_store()
     await store.batch_write(items)
+    record_rows_written("market", len(items))
     return len(items)
 
 async def _write_onchain_features_to_store(df: pd.DataFrame) -> int:
@@ -792,7 +879,10 @@ async def _write_onchain_features_to_store(df: pd.DataFrame) -> int:
         return 0
 
     store = get_store()
+    # inside _write_onchain_features_to_store(...)
+    store = get_store()
     await store.batch_write(items)
+    record_rows_written("onchain", len(items))
     return len(items)
 
 
@@ -836,8 +926,77 @@ async def _write_social_features_to_store(df: pd.DataFrame) -> int:
     if not items:
         return 0
 
+    # inside _write_social_features_to_store(...)
     store = get_store()
     await store.batch_write(items)
+    record_rows_written("social", len(items))
+    return len(items)
+
+async def _write_news_features_to_store(df: pd.DataFrame) -> int:
+    """
+    Write news features to Redis under domain 'news'.
+    Expected columns (tolerant):
+      - timestamp: 'ts' (preferred) or 'published_at' (string/datetime)
+      - identity: 'topic' or 'source' (used as symbol; default 'news')
+      - payload: 'title', 'text' or 'summary', 'url', optional 'sentiment_score'
+    """
+    if df is None or df.empty:
+        return 0
+
+    df = df.copy()
+
+    # Normalize timestamp column -> 'ts' tz-aware UTC
+    if "ts" not in df.columns:
+        if "published_at" in df.columns:
+            df["ts"] = df["published_at"]
+        else:
+            # nothing to write without a timestamp
+            logger.warning("news features missing 'ts'/'published_at'; nothing written")
+            return 0
+
+    try:
+        df = _ensure_utc_col(df, "ts")
+    except Exception as norm_err:
+        logger.warning("UTC normalize failed for news; falling back via epoch: %s", norm_err)
+        df = _force_epoch_then_utc(df, "ts")
+
+    # Derive symbol/topic and payload text fields
+    if "topic" not in df.columns:
+        if "source" in df.columns:
+            df["topic"] = df["source"]
+        else:
+            df["topic"] = "news"
+
+    if "text" not in df.columns:
+        if "summary" in df.columns:
+            df["text"] = df["summary"]
+        elif "content" in df.columns:
+            df["text"] = df["content"]
+
+    items = []
+    for _, r in df.iterrows():
+        payload = {
+            "title": None if pd.isna(r.get("title")) else str(r.get("title")),
+            "text": None if pd.isna(r.get("text")) else str(r.get("text")),
+            "url": None if pd.isna(r.get("url")) else str(r.get("url")),
+            "sentiment": None if pd.isna(r.get("sentiment_score")) else float(r.get("sentiment_score")),
+            "source": None if pd.isna(r.get("source")) else str(r.get("source")),
+        }
+
+        items.append({
+            "domain": "news",
+            "symbol": str(r.get("topic") or "news"),
+            "timeframe": str(r.get("timeframe", "1m")),
+            "ts": _epoch_s_from_ts(r["ts"]),
+            "payload": payload,
+        })
+
+    if not items:
+        return 0
+
+    store = get_store()
+    await store.batch_write(items)
+    record_rows_written("news", len(items))
     return len(items)
 
 # --- Admin guard via header token ---

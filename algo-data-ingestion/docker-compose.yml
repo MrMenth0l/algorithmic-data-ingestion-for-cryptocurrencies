@@ -92,16 +92,15 @@ services:
     env_file:
       - .env
     environment:
-      API_BASE_URL: "http://ingestion-api:8000"
-      ADMIN_TOKEN: "${ADMIN_TOKEN}"
-      RUN_ON_START: "1"
-      SCHED_TZ: "UTC"
-      SCHED_METRICS_PORT: "9002"
-      MARKET_JOBS: >-
-        [{"exchange":"binance","symbol":"BTC/USDT","timeframe":"1m","lookback_minutes":15,"cron":"*/5 * * * *"}]
-      TTL_SWEEP_CRON: "*/15 * * * *"
-      TTL_SWEEP_PATTERN: "features:market:*"
-      TTL_SWEEP_TTL: "3600"
+      - API_BASE_URL=http://ingestion-api:8000/ingest
+      - ADMIN_TOKEN=${ADMIN_TOKEN}
+      - RUN_ON_START=1
+      - SCHED_TZ=UTC
+      - SCHED_METRICS_PORT=9002
+      - MARKET_JOBS=[{"exchange":"binance","symbol":"BTC/USDT","timeframe":"1m","lookback_minutes":15,"cron":"*/5 * * * *"}]
+      - TTL_SWEEP_CRON=*/15 * * * *
+      - TTL_SWEEP_PATTERN=features:market:*
+      - TTL_SWEEP_TTL=3600
     ports:
       - "9002:9002"
     restart: unless-stopped
