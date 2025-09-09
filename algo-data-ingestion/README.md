@@ -390,3 +390,29 @@ docker compose up -d ingestion-api
 
 Añadir más trabajos de mercado:
 - Edita `docker-compose.yml`, variable de entorno `MARKET_JOBS` del `scheduler` y agrega entradas JSON con `{exchange, symbol, timeframe, lookback_minutes, cron}`.
+
+---
+
+## Parquet Ingest (scheduler)
+
+Además de los backfills hacia Redis, el `scheduler` puede ejecutar ingestiones periódicas que escriben OHLCV normalizado a Parquet en el data lake usando el endpoint `POST /ingest/market/{exchange}`.
+
+- Variable: `MARKET_INGEST_JOBS` (JSON list)
+- Esquema por item: `{ "exchange": "binance", "symbol": "BTC/USDT", "timeframe": "1m", "limit": 500, "cron": "*/10 * * * *" }`
+
+Ejemplo en `docker-compose.yml`:
+```
+MARKET_INGEST_JOBS=[
+  {"exchange":"binance","symbol":"BTC/USDT","timeframe":"1m","limit":500,"cron":"*/10 * * * *"},
+  {"exchange":"binance","symbol":"ETH/USDT","timeframe":"1m","limit":500,"cron":"*/10 * * * *"}
+]
+```
+
+Verificación rápida:
+```bash
+# Logs del scheduler
+docker compose logs -f scheduler
+
+# Nuevos archivos parquet en el host
+find data_lake/market -type f -name '*.parquet' | head
+```

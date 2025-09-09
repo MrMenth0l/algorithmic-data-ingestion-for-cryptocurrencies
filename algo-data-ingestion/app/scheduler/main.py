@@ -41,6 +41,18 @@ def _get_market_jobs() -> List[Dict[str, Any]]:
         log.warning("Failed to parse MARKET_JOBS (%s). Using empty list.", e)
         return []
 
+# Market ingest-to-parquet jobs JSON: list of {"exchange","symbol","timeframe","limit","cron"}
+def _get_market_ingest_jobs() -> List[Dict[str, Any]]:
+    raw = os.getenv("MARKET_INGEST_JOBS", "[]")
+    try:
+        jobs = json.loads(raw) if raw.strip() else []
+        if not isinstance(jobs, list):
+            raise ValueError("MARKET_INGEST_JOBS must be a JSON list")
+        return jobs
+    except Exception as e:
+        log.warning("Failed to parse MARKET_INGEST_JOBS (%s). Using empty list.", e)
+        return []
+
 # TTL sweep config
 TTL_SWEEP_CRON: str = os.getenv("TTL_SWEEP_CRON", "*/15 * * * *")
 TTL_SWEEP_PATTERN: str = os.getenv("TTL_SWEEP_PATTERN", "features:market:*")
@@ -139,6 +151,17 @@ async def _post_admin(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             return {"raw": resp.text}
 
+async def _post_json(path: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    """POST JSON body to a path (no admin header), return JSON response."""
+    url = f"{API_BASE_URL}{path}"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(url, json=body)
+        resp.raise_for_status()
+        try:
+            return resp.json()
+        except Exception:
+            return {"raw": resp.text}
+
 # ------------------------------------------------------------------------------
 # Job wrappers (with metrics)
 # ------------------------------------------------------------------------------
@@ -203,6 +226,22 @@ async def run_ttl_sweep_job(pattern: str, ttl_default: int, max_keys: Optional[i
     if out is not None:
         log.info("TTL sweep ok -> %s", out)
 
+async def _market_ingest(exchange: str, symbol: str, timeframe: str, limit: int) -> Dict[str, Any]:
+    """
+    Calls the ingest endpoint which fetches OHLCV and writes Parquet.
+    Endpoint: POST /ingest/market/{exchange}
+    Body: { symbol, granularity=timeframe, limit }
+    """
+    path = f"/ingest/market/{exchange}"
+    body = {"symbol": symbol, "granularity": timeframe, "limit": limit}
+    return await _post_json(path, body)
+
+async def run_market_ingest_job(exchange: str, symbol: str, timeframe: str, limit: int) -> None:
+    job_id = f"ingest:{exchange}:{symbol}:{timeframe}"
+    out = await _run_with_metrics(job_id, _market_ingest, exchange, symbol, timeframe, limit)
+    if out is not None:
+        log.info("Market ingest ok %s -> %s", job_id, out)
+
 # ------------------------------------------------------------------------------
 # Bootstrapping + scheduling
 # ------------------------------------------------------------------------------
@@ -253,6 +292,46 @@ def _add_market_jobs(sched: AsyncIOScheduler, jobs: List[Dict[str, Any]]) -> Non
                 replace_existing=True,
             )
 
+def _add_market_ingest_jobs(sched: AsyncIOScheduler, jobs: List[Dict[str, Any]]) -> None:
+    for j in jobs:
+        exchange = j["exchange"]
+        symbol = j["symbol"]
+        timeframe = j["timeframe"]
+        limit = int(j.get("limit", 500))
+        cron = j["cron"]
+        job_id = f"ingest:{exchange}:{symbol}:{timeframe}"
+
+        # Cron job
+        sched.add_job(
+            run_market_ingest_job,
+            trigger=CronTrigger.from_crontab(cron, timezone=_tz()),
+            id=job_id,
+            kwargs={
+                "exchange": exchange,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "limit": limit,
+            },
+            max_instances=1,
+            replace_existing=True,
+        )
+
+        # One-shot on boot (optional)
+        if RUN_ON_START:
+            sched.add_job(
+                run_market_ingest_job,
+                trigger="date",
+                run_date=None,  # now
+                id=f"boot-ingest:{exchange}:{symbol}:{timeframe}",
+                kwargs={
+                    "exchange": exchange,
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "limit": limit,
+                },
+                replace_existing=True,
+            )
+
 def _add_ttl_sweep_job(sched: AsyncIOScheduler) -> None:
     # Cron job
     sched.add_job(
@@ -298,6 +377,7 @@ async def _amain() -> None:
 
     # Add jobs
     _add_market_jobs(sched, _get_market_jobs())
+    _add_market_ingest_jobs(sched, _get_market_ingest_jobs())
     _add_ttl_sweep_job(sched)
 
     # Park forever
