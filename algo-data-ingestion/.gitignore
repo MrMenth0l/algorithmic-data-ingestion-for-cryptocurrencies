@@ -20,8 +20,13 @@ __pycache__/
 .idea/
 .vscode/
 
-#parquet files
-data_lake/
+# Parquet/data lake (ignore at any depth)
+**/data_lake/
+tests/data_lake/
+
+# Ignore Python caches everywhere
+**/__pycache__/
+**/*.pyc
 
 # macOS / Windows system files
 .DS_Store

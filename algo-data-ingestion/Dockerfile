@@ -1,13 +1,18 @@
 # syntax=docker/dockerfile:1
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
+# Build args to optionally install heavy ML deps in production builds
+ARG INSTALL_ML=0
+
 # System dependencies for pyarrow/snappy and builds
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Switch APT sources to HTTPS to avoid 403 mirrors in some environments
+RUN sed -i 's|http://|https://|g' /etc/apt/sources.list.d/debian.sources && \
+    apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc \
     g++ \
@@ -22,6 +27,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 # Core Python dependencies
 # NOTE: transformers + torch are large; needed for sentiment endpoints.
 # If you don't need them immediately, you can remove them to slim the image.
+# Core Python deps (lean build). Heavy ML deps are optional via INSTALL_ML.
 RUN pip install --no-cache-dir \
     fastapi \
     uvicorn[standard] \
@@ -43,9 +49,13 @@ RUN pip install --no-cache-dir \
     APScheduler==3.10.4 \
     pytz \
     tzlocal \
-    sentence-transformers \
-    transformers \
-    torch
+    sentence-transformers || true
+
+# Optionally add transformers/torch if requested
+RUN if [ "$INSTALL_ML" = "1" ]; then \
+      pip install --no-cache-dir transformers && \
+      pip install --no-cache-dir torch || true ; \
+    fi
 
 # Copy application code
 COPY . .

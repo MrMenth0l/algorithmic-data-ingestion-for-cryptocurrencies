@@ -6,7 +6,6 @@ from datetime import datetime
 import logging
 import asyncio
 from prometheus_client import Counter, CollectorRegistry
-from transformers import pipeline
 from app.common.time_norm import standardize_time_column, add_dt_partition, coerce_schema
 
 _METRICS_REGISTRY = CollectorRegistry()
@@ -14,13 +13,22 @@ TWITTER_CALLS = Counter('twitter_calls_total', 'Total Twitter API calls', regist
 TWITTER_RATE_LIMITS = Counter('twitter_rate_limits_total', 'Twitter rate-limit hits', registry=_METRICS_REGISTRY)
 TWITTER_PARSE_ERRORS = Counter('twitter_parse_errors_total', 'Total parse errors in Twitter adapter', registry=_METRICS_REGISTRY)
 logger = logging.getLogger(__name__)
-try:
-    sentiment_analyzer = pipeline("sentiment-analysis")
-except Exception as e:
-    logger.warning(f"Sentiment pipeline load failed: {e}")
-    # Fallback analyzer returns neutral score
+def _make_default_sentiment():
+    return [{"score": 0.0}]
+
+# Avoid heavy model downloads/initialization on import by default. Enable via env.
+_ENABLE_PIPELINE = os.getenv("ENABLE_SENTIMENT_PIPELINE", "0") not in ("0", "false", "False", "")
+if _ENABLE_PIPELINE:
+    try:
+        from transformers import pipeline  # import only when enabled
+        sentiment_analyzer = pipeline("sentiment-analysis")
+    except Exception as e:
+        logger.warning(f"Sentiment pipeline load failed: {e}")
+        def sentiment_analyzer(text):
+            return _make_default_sentiment()
+else:
     def sentiment_analyzer(text):
-        return [{"score": 0.0}]
+        return _make_default_sentiment()
 
 # You’ll need to set these env vars: TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_BEARER
 CLIENT = tweepy.Client(

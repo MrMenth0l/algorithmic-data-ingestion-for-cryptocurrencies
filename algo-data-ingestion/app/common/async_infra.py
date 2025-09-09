@@ -18,7 +18,7 @@ from tenacity import (
     retry_if_exception,
 )
 
-__all__ = ["make_async_client", "retry_httpx"]
+__all__ = ["make_async_client", "retry_httpx", "get_http", "close_http"]
 
 # -------------------------------------------------------------
 # Retry policy
@@ -38,6 +38,7 @@ def _should_retry(exc: BaseException) -> bool:
             httpx.WriteError,
             httpx.TimeoutException,
             httpx.RemoteProtocolError,
+            httpx.PoolTimeout,
         ),
     ):
         return True
@@ -59,7 +60,7 @@ def retry_httpx(max_attempts: int = 5):
     """
     return retry(
         retry=retry_if_exception(_should_retry),
-        wait=wait_random_exponential(multiplier=0.2, max=5.0),
+        wait=wait_random_exponential(multiplier=0.5, max=30.0),
         stop=stop_after_attempt(max_attempts),
         reraise=True,
     )
@@ -98,3 +99,29 @@ def make_async_client(
         limits=limits,
         timeout=timeout,
     )
+
+
+# -------------------------------------------------------------
+# Shared singleton client & lifecycle helpers
+# -------------------------------------------------------------
+
+_CLIENT: Optional[httpx.AsyncClient] = None
+
+def get_http() -> httpx.AsyncClient:
+    """Return a process-wide shared AsyncClient (created lazily).
+
+    Uses `make_async_client` with sane pool sizes for our service. Centralizing
+    this ensures connection reuse and simplifies DI via FastAPI lifespan.
+    """
+    global _CLIENT
+    if _CLIENT is None:
+        # Defaults aligned with Phase-2 Batch 1.1 acceptance
+        _CLIENT = make_async_client(timeout_sec=10.0, max_keepalive=20, max_connections=100)
+    return _CLIENT
+
+async def close_http() -> None:
+    """Close and clear the shared AsyncClient (idempotent)."""
+    global _CLIENT
+    if _CLIENT is not None:
+        client, _CLIENT = _CLIENT, None
+        await client.aclose()

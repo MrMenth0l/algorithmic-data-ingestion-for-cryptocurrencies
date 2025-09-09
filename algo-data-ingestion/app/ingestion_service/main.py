@@ -6,6 +6,9 @@ import logging
 from app.ingestion_service.config import settings
 from app.features.jobs.backfill import backfill_market_once, ttl_sweep_once
 from contextlib import asynccontextmanager
+import os
+import redis.asyncio as redis
+from app.common.async_infra import get_http, close_http
 from app.features.ingestion.news_client import NewsClient
 from app.features.ingestion.ccxt_client import CCXTClient
 from app.features.ingestion.social_client import SocialClient
@@ -55,7 +58,8 @@ async def lifespan(app: FastAPI):
         _fs.FEATURE_HITS_TOTAL.labels(domain=dom).inc(0)                              # NEW
         _fs.FEATURE_MISSES_TOTAL.labels(domain=dom).inc(0)                            # NEW
     # --------------------------------------------------------------------------  # NEW
-
+    app.state.http = get_http()                         # NEW shared AsyncClient
+    app.state.redis = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))  # NEW shared Redis
     # Create shared NewsClient instance
     app.state.news_client = NewsClient()
     # Create shared CCXT client (async)
@@ -70,10 +74,12 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         # Graceful shutdown
+        await app.state.redis.close()
         await app.state.social_client.aclose()
         await app.state.onchain_client.aclose()
         await app.state.ccxt_client.aclose()
         await app.state.news_client.aclose()
+        await close_http()
 
 app = FastAPI(lifespan=lifespan)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -159,6 +165,12 @@ def get_onchain(request: Request) -> OnchainClient:
 
 def get_social(request: Request) -> SocialClient:
     return request.app.state.social_client
+
+def get_http_dep(request: Request):
+    return request.app.state.http
+
+def get_redis_dep(request: Request):
+    return request.app.state.redis
 
 if __name__ == "__main__":
     import uvicorn

@@ -18,7 +18,7 @@ cp .env.example .env
 # edit .env -> set ADMIN_TOKEN to a strong random string
 ```
 
-2) Boot:
+2) Boot (build lean image without heavy ML deps):
 ```bash
 docker compose up -d --build
 ```
@@ -35,7 +35,9 @@ docker compose up -d --build
 - Prometheus: http://localhost:9090
 - Grafana: http://localhost:3000 (default: admin/admin)
 
-> **API keys note:** Phase 2 runs without external keys. Social/news may return `{"status":"no_data"}` and on-chain may bubble upstream errors (e.g., Glassnode 401) until keys are provided. Phase 3 will wire real keys.
+> Notes
+> - La imagen se construye “lean” por defecto (sin instalar `torch`/`transformers`) para acelerar el build. Si necesitas ML dentro del contenedor, puedes construir con `--build-arg INSTALL_ML=1`.
+> - Sin llaves API, social/news y on-chain pueden devolver `no_data` o errores 401 del proveedor. Con llaves, funcionará scraping real.
 
 ---
 
@@ -350,3 +352,41 @@ Admin endpoints require `X-Admin-Token`. Keep `.env` out of version control, use
 - Add tests for the news route.
 - Expand scheduler jobs to on-chain/social/news once keys are present.
 - Optional: retention policies (TTL per domain), richer Grafana dashboards.
+
+---
+
+## Data Scraping (via Docker Compose)
+
+El archivo `docker-compose.yml` ya incluye un servicio `scheduler` con trabajos de backfill configurados para:
+
+- `binance BTC/USDT 1m` cada 5 minutos (lookback 60 min)
+- `binance BTC/USDT 5m` cada 15 minutos (lookback 360 min)
+- `binance ETH/USDT 1m` cada 5 minutos (lookback 60 min)
+
+Además, un trabajo de TTL sweep cada 15 minutos para aplicar expiraciones en Redis (`TTL_SWEEP_*`).
+
+Cómo corre el scraping:
+- Al iniciar el stack (`docker compose up -d --build`), el scheduler espera a que el API esté disponible y ejecuta los trabajos una vez (por `RUN_ON_START=1`) y luego según el cron.
+- El API expone los endpoints admin bajo `/ingest/admin/*` protegidos por `X-Admin-Token` (tomado de `.env`).
+- Los datos crudos (OHLCV normalizado) se escriben en Parquet bajo `./data_lake/market/...` y las features a Redis.
+
+Verificación rápida de backfill:
+```bash
+# Logs del scheduler
+docker compose logs -f scheduler
+
+# Archivos parquet generados (en el host)
+find data_lake/market -type f -name '*.parquet' | head
+
+# Claves de features en Redis (dentro del contenedor redis)
+docker compose exec redis redis-cli --scan --pattern 'features:market:*' | head
+```
+
+Habilitar ML en la imagen (opcional):
+```bash
+docker compose build --build-arg INSTALL_ML=1 ingestion-api
+docker compose up -d ingestion-api
+```
+
+Añadir más trabajos de mercado:
+- Edita `docker-compose.yml`, variable de entorno `MARKET_JOBS` del `scheduler` y agrega entradas JSON con `{exchange, symbol, timeframe, lookback_minutes, cron}`.

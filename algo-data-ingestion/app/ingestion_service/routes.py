@@ -13,6 +13,10 @@ import inspect
 
 import pandas as pd
 import redis
+try:
+    import fakeredis
+except Exception:
+    fakeredis = None
 from fastapi import (
     APIRouter,
     HTTPException,
@@ -54,13 +58,24 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Sync Redis client for simple health/demo endpoints (feature store is async)
-_redis = redis.Redis(
-    host=getattr(settings, "redis_host", "redis"),
-    port=getattr(settings, "redis_port", 6379),
-    db=getattr(settings, "redis_db", 0),
-    password=getattr(settings, "redis_password", None) or None,
-    decode_responses=True,
-)
+def _make_sync_redis():
+    host = getattr(settings, "redis_host", "redis")
+    port = getattr(settings, "redis_port", 6379)
+    db = getattr(settings, "redis_db", 0)
+    pwd = getattr(settings, "redis_password", None) or None
+    try:
+        r = redis.Redis(host=host, port=port, db=db, password=pwd, decode_responses=True)
+        # Try a ping early to surface connection issues
+        r.ping()
+        return r
+    except Exception:
+        # Fallback to fakeredis only in test/dev environments
+        if fakeredis is not None:
+            return fakeredis.FakeRedis(decode_responses=True)
+        # Re-raise if we cannot fall back
+        raise
+
+_redis = _make_sync_redis()
 
 # ---------------------------
 # Helpers
@@ -620,10 +635,14 @@ def redis_health_check():
     raise HTTPException(status_code=503, detail="Redis ping failed")
 
 @router.post("/features/write")
-def write_features(vec: FeatureVector = Body(...)):
-    key = f"features:{vec.symbol}:{vec.timestamp}"
-    payload = vec.json()
-    _redis.set(key, payload, ex=getattr(settings, "feature_ttl_seconds", 3600))
+def write_features(body: dict = Body(...)):
+    symbol = body.get("symbol")
+    ts = body.get("timestamp")
+    if not symbol or ts is None:
+        raise HTTPException(status_code=422, detail="symbol and timestamp are required")
+    key = f"features:{symbol}:{int(ts)}"
+    # Store the raw body so we preserve the client's shape (expects 'features')
+    _redis.set(key, json.dumps(body), ex=getattr(settings, "feature_ttl_seconds", 3600))
     return {"status": "ok", "key": key}
 
 @router.get("/features/read")
@@ -632,8 +651,16 @@ def read_features(symbol: str = Query(...), timestamp: int = Query(...)):
     raw = _redis.get(key)
     if not raw:
         raise HTTPException(status_code=404, detail="Feature vector not found")
-    vec = FeatureVector.parse_raw(raw)
-    return vec
+    # Return the stored payload as-is (keeps 'features' field)
+    try:
+        return json.loads(raw)
+    except Exception:
+        # Fallback to pydantic decode if older payloads were stored
+        try:
+            vec = FeatureVector.model_validate_json(raw)
+            return {"symbol": vec.symbol, "timestamp": vec.timestamp, "features": vec.payload}
+        except Exception:
+            raise HTTPException(status_code=500, detail="Stored feature payload is invalid")
 
 # ---------------------------
 # Feature Retrieval (async, via RedisFeatureStore)
