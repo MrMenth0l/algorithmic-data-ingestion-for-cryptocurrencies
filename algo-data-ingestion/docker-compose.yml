@@ -36,6 +36,7 @@ services:
     volumes:
       - ./data_lake:/app/data_lake
       - hf-cache:/app/.cache/huggingface
+      # - ./secrets:/secrets:ro  # mount GCP SA JSON here and set GOOGLE_APPLICATION_CREDENTIALS
     ports:
       - "8000:8000"
     depends_on:
@@ -126,4 +127,10 @@ services:
 volumes:
   redis-data: {}
   prometheus-data: {}
+      # S3/GCS (opt-in)
+      # AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      # AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      # AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+      # GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS}
+      # FSSPEC_STORAGE_OPTIONS=${FSSPEC_STORAGE_OPTIONS}
   hf-cache: {}

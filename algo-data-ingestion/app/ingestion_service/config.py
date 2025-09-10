@@ -65,6 +65,8 @@ class Settings(BaseSettings):
     ML_MAX_WORKERS: int = Field(default=4, env="ML_MAX_WORKERS")
     SOCIAL_SENTIMENT_ENRICH: bool = Field(default=True, env="SOCIAL_SENTIMENT_ENRICH")
     HF_HOME: Optional[str] = Field(default=None, env="HF_HOME")
+    # fsspec storage options (JSON string), e.g. '{"anon": false, "client_kwargs": {"region_name": "us-east-1"}}'
+    FSSPEC_STORAGE_OPTIONS: Optional[str] = Field(default=None, env="FSSPEC_STORAGE_OPTIONS")
 
     class Config:
         env_file = ".env"

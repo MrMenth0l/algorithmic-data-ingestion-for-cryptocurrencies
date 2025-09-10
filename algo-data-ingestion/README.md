@@ -453,3 +453,42 @@ Métricas:
 - `ml_infer_requests_total{model=...}`
 - `ml_infer_duration_seconds{model=...}`
 - `ml_infer_errors_total{model=...,type=...}`
+
+---
+
+## Object Storage (S3/GCS) via fsspec (Opt-in)
+
+The Parquet writer supports any fsspec backend. To write directly to object storage:
+
+1) Optional deps (already in the Docker image): `s3fs`, `gcsfs`.
+2) Point your data lake paths to S3 or GCS and set credentials.
+
+S3 example
+```bash
+# .env (host) or docker-compose env
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_DEFAULT_REGION=us-east-1
+DATA_LAKE_PATH=s3://my-bucket/algo-data-lake
+MARKET_PATH=s3://my-bucket/algo-data-lake/market
+# Optional advanced fsspec options (JSON string)
+FSSPEC_STORAGE_OPTIONS='{"client_kwargs": {"region_name": "us-east-1"}}'
+```
+
+GCS example
+```bash
+# Mount your service account JSON in the container
+# docker-compose.yml
+#   volumes:
+#     - ./secrets:/secrets:ro
+
+# .env
+GOOGLE_APPLICATION_CREDENTIALS=/secrets/gcp-sa.json
+DATA_LAKE_PATH=gs://my-bucket/algo-data-lake
+MARKET_PATH=gs://my-bucket/algo-data-lake/market
+```
+
+Notes
+- Use absolute paths for the base `DATA_LAKE_PATH` and domain paths.
+- `FSSPEC_STORAGE_OPTIONS` (JSON) is passed to fsspec’s `url_to_fs` for advanced configuration.
+- For S3, IAM roles or instance profiles also work (omit explicit keys).

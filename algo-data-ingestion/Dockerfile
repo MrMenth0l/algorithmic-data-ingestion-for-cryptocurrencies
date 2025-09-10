@@ -49,6 +49,8 @@ RUN pip install --no-cache-dir \
     APScheduler==3.10.4 \
     pytz \
     tzlocal \
+    s3fs \
+    gcsfs \
     sentence-transformers || true
 
 # Optionally add transformers/torch if requested

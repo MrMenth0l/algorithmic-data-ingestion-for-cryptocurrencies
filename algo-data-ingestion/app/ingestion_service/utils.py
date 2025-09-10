@@ -1,13 +1,14 @@
 import logging
 import os
 import time
-import tempfile
+import json
 import fsspec
 import pandas as pd
 from typing import Dict
 from prometheus_client import Counter, Histogram, CollectorRegistry
 from app.ingestion_service.parquet_schemas import MARKET_SCHEMA, ONCHAIN_SCHEMA, SOCIAL_SCHEMA, NEWS_SCHEMA
 from app.common.time_norm import add_dt_partition
+from app.ingestion_service.config import settings
 
 _METRICS_REGISTRY = CollectorRegistry()
 PARQUET_WRITES_TOTAL = Counter(
@@ -122,8 +123,14 @@ def write_to_parquet(df, base_path, partitions, filename=None):
     elif "news" in base_path:
         validate_schema(df, NEWS_SCHEMA, coerce=True)
 
-    # Resolve filesystem and root path
-    fs, root = fsspec.core.url_to_fs(base_path)
+    # Resolve filesystem and root path (support custom storage options)
+    storage_options = {}
+    if settings.FSSPEC_STORAGE_OPTIONS:
+        try:
+            storage_options = json.loads(settings.FSSPEC_STORAGE_OPTIONS)
+        except Exception:
+            storage_options = {}
+    fs, root = fsspec.core.url_to_fs(base_path, **storage_options)
     # Ensure fs is an instance (tests may return a class)
     if isinstance(fs, type):
         fs = fs(root)
@@ -150,8 +157,28 @@ def write_to_parquet(df, base_path, partitions, filename=None):
         # Atomic write to temp file
         with fs.open(temp_path, 'wb') as f:
             df.to_parquet(f, compression="snappy", index=False, engine="pyarrow")
-        # Move temp to final path
-        fs.mv(temp_path, full_path, rename_if_exists=True)
+        # Move temp to final path (robust across backends)
+        moved = False
+        try:
+            fs.mv(temp_path, full_path, recursive=True)  # works for many fs
+            moved = True
+        except TypeError:
+            try:
+                fs.mv(temp_path, full_path)
+                moved = True
+            except Exception:
+                moved = False
+        if not moved:
+            try:
+                # Fallback: copy then remove
+                with fs.open(temp_path, 'rb') as src, fs.open(full_path, 'wb') as dst:
+                    dst.write(src.read())
+                fs.rm(temp_path)
+                moved = True
+            except Exception:
+                moved = False
+        if not moved:
+            raise RuntimeError(f"Failed to move temp file to final destination: {full_path}")
         duration = time.time() - start
         PARQUET_WRITES_TOTAL.inc()
         PARQUET_WRITE_LATENCY.observe(duration)
@@ -160,4 +187,3 @@ def write_to_parquet(df, base_path, partitions, filename=None):
         PARQUET_WRITE_ERRORS.inc()
         logger.error(f"Failed writing Parquet to {full_path}: {e}")
         raise
-
