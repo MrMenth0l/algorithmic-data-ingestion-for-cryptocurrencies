@@ -416,3 +416,40 @@ docker compose logs -f scheduler
 # Nuevos archivos parquet en el host
 find data_lake/market -type f -name '*.parquet' | head
 ```
+
+---
+
+## ML Inference (Opt-in)
+
+Para habilitar inferencia de sentimiento con modelos reales (DistilBERT por defecto) y el endpoint `/ml/sentiment/predict`:
+
+1) Construir la imagen del API con ML:
+   - En `docker-compose.yml` cambiar `INSTALL_ML: 0` a `INSTALL_ML: 1` para `ingestion-api`.
+2) Activar los flags en entorno:
+   - `ML_SENTIMENT_ENABLED=1`
+   - `SENTIMENT_MODEL_ID=distilbert/distilbert-base-uncased-finetuned-sst-2-english`
+   - `ML_MAX_WORKERS=4` (opcional)
+   - `HF_HOME=/app/.cache/huggingface` (cache de modelos)
+   - (opcional) `SOCIAL_SENTIMENT_ENRICH=1` para enriquecer ingest social con `sentiment_label` y `sentiment_score`.
+3) (Recomendado) Montar un volumen para cache de modelos:
+```
+volumes:
+  - hf-cache:/app/.cache/huggingface
+```
+4) Reconstruir y levantar:
+```
+docker compose build ingestion-api
+docker compose up -d ingestion-api
+```
+
+Probar inferencia:
+```
+curl -s -X POST http://localhost:8000/ml/sentiment/predict \
+  -H 'Content-Type: application/json' \
+  -d '{"texts":["btc to the moon","market looks bad"]}' | jq
+```
+
+Métricas:
+- `ml_infer_requests_total{model=...}`
+- `ml_infer_duration_seconds{model=...}`
+- `ml_infer_errors_total{model=...,type=...}`

@@ -52,6 +52,8 @@ import inspect
 from fastapi import HTTPException
 from app.ingestion_service.metrics import ingest_span, record_rows_written
 from fastapi.responses import JSONResponse
+from app.ingestion_service.config import settings
+from app.ingestion_service import ml_utils
 
 logger = logging.getLogger(__name__)
 
@@ -412,6 +414,17 @@ async def ingest_social(platform: str, body: SocialIngestRequest):
                         df["text"] = df["selftext"]
                 if "sentiment_score" not in df.columns:
                     df["sentiment_score"] = None
+                # Optional: ML enrichment
+                try:
+                    if settings.ML_SENTIMENT_ENABLED and settings.SOCIAL_SENTIMENT_ENRICH:
+                        texts = [str(t) if t is not None else "" for t in df.get("text", [])]
+                        if texts:
+                            preds = await ml_utils.predict(texts)
+                            if preds and len(preds) == len(df):
+                                df["sentiment_label"] = [p.get("label") for p in preds]
+                                df["sentiment_score"] = [float(p.get("score_signed", 0.0)) for p in preds]
+                except Exception as e:
+                    logger.warning("Sentiment enrichment failed: %s", e)
 
             partitions = {
                 "query": body.query.replace(" ", "_"),

@@ -14,6 +14,7 @@ from app.features.ingestion.ccxt_client import CCXTClient
 from app.features.ingestion.social_client import SocialClient
 from app.features.ingestion.onchain_client import OnchainClient
 from app.features.store import redis_store as _feature_store  # noqa: F401
+from app.ingestion_service import ml_utils
 from prometheus_client import Gauge
 from app.ingestion_service.utils import _METRICS_REGISTRY
 
@@ -71,6 +72,9 @@ async def lifespan(app: FastAPI):
     app.state.onchain_client = OnchainClient()
     app.state.social_client = SocialClient()
     try:
+        # Optionally warm ML in background (avoid blocking startup)
+        if settings.ML_SENTIMENT_ENABLED:
+            logging.info("ML sentiment enabled; pipeline will load on first use")
         yield
     finally:
         # Graceful shutdown
@@ -80,6 +84,10 @@ async def lifespan(app: FastAPI):
         await app.state.ccxt_client.aclose()
         await app.state.news_client.aclose()
         await close_http()
+        try:
+            ml_utils.shutdown()
+        except Exception:
+            pass
 
 app = FastAPI(lifespan=lifespan)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -183,3 +191,9 @@ if __name__ == "__main__":
 
 from .routes import router
 app.include_router(router, prefix="/ingest")
+if settings.ML_SENTIMENT_ENABLED:
+    try:
+        from .ml_routes import router as ml_router
+        app.include_router(ml_router)
+    except Exception as e:
+        logging.warning("ML routes not mounted: %s", e)

@@ -56,6 +56,16 @@ class Settings(BaseSettings):
     TTL_SWEEP_INTERVAL_SEC: int = Field(default=600)
     ADMIN_TOKEN: Optional[str] = None
 
+    # ML / Sentiment
+    ML_SENTIMENT_ENABLED: bool = Field(default=False, env="ML_SENTIMENT_ENABLED")
+    SENTIMENT_MODEL_ID: str = Field(
+        default="distilbert/distilbert-base-uncased-finetuned-sst-2-english",
+        env="SENTIMENT_MODEL_ID",
+    )
+    ML_MAX_WORKERS: int = Field(default=4, env="ML_MAX_WORKERS")
+    SOCIAL_SENTIMENT_ENRICH: bool = Field(default=True, env="SOCIAL_SENTIMENT_ENRICH")
+    HF_HOME: Optional[str] = Field(default=None, env="HF_HOME")
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
