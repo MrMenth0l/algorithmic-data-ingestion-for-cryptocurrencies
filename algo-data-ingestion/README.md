@@ -492,3 +492,10 @@ Notes
 - Use absolute paths for the base `DATA_LAKE_PATH` and domain paths.
 - `FSSPEC_STORAGE_OPTIONS` (JSON) is passed to fsspec’s `url_to_fs` for advanced configuration.
 - For S3, IAM roles or instance profiles also work (omit explicit keys).
+
+Storage check endpoint (admin)
+```bash
+# Resolve backends and run a write/delete probe (local/S3/GCS depending on env)
+curl -s -H "X-Admin-Token: $ADMIN_TOKEN" \
+  "http://localhost:8000/ingest/admin/storage/check?probe=1&domain=market" | jq
+```

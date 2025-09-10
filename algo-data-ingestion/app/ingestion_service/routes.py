@@ -54,6 +54,9 @@ from app.ingestion_service.metrics import ingest_span, record_rows_written
 from fastapi.responses import JSONResponse
 from app.ingestion_service.config import settings
 from app.ingestion_service import ml_utils
+import fsspec
+import os
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -1100,3 +1103,66 @@ async def admin_ttl_sweep(
     return result
 
 router.include_router(admin)
+
+# ---------------------------
+# Storage check (admin)
+# ---------------------------
+
+@admin.get("/storage/check")
+async def storage_check(
+    probe: bool = Query(False, description="Write a temporary probe file and remove it"),
+    domain: Optional[str] = Query(None, description="market|onchain|social|news; if omitted, checks all"),
+    cleanup: bool = Query(True, description="Remove the probe file after writing"),
+):
+    """
+    Resolve fsspec filesystem(s) for configured data lake paths and optionally
+    perform a write/delete probe to validate credentials/connectivity.
+    """
+    import json as _json
+
+    storage_options = {}
+    if getattr(settings, "FSSPEC_STORAGE_OPTIONS", None):
+        try:
+            storage_options = _json.loads(settings.FSSPEC_STORAGE_OPTIONS)
+        except Exception:
+            storage_options = {}
+
+    paths = {
+        "market": getattr(settings, "market_path", "data_lake/market"),
+        "onchain": getattr(settings, "onchain_path", "data_lake/onchain"),
+        "social": getattr(settings, "social_path", "data_lake/social"),
+        "news": getattr(settings, "news_path", "data_lake/news"),
+    }
+    if domain:
+        domain = domain.lower()
+        if domain not in paths:
+            raise HTTPException(status_code=422, detail="Invalid domain")
+        items = [(domain, paths[domain])]
+    else:
+        items = list(paths.items())
+
+    out = {"checks": []}
+    for dom, base in items:
+        try:
+            fs, root = fsspec.core.url_to_fs(base, **storage_options)
+            proto = getattr(fs, "protocol", None)
+            if isinstance(proto, (list, tuple)):
+                proto = "+".join(proto)
+            info = {"domain": dom, "path": base, "protocol": proto or "unknown", "ok": True}
+            if probe:
+                fname = f"_probe_{int(time.time()*1000)}.txt"
+                p = os.path.join(root, fname)
+                try:
+                    with fs.open(p, "wb") as f:
+                        f.write(b"ok")
+                    if cleanup:
+                        fs.rm(p)
+                    info["probe"] = {"wrote": True, "removed": bool(cleanup)}
+                except Exception as e:
+                    info["probe"] = {"wrote": False, "error": str(e)}
+                    info["ok"] = False
+            out["checks"].append(info)
+        except Exception as e:
+            out["checks"].append({"domain": dom, "path": base, "ok": False, "error": str(e)})
+
+    return out
