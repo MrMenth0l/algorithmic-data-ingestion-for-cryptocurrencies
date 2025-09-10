@@ -456,6 +456,43 @@ Métricas:
 
 ---
 
+## Dataset Builders
+
+The repo includes simple scripts to produce training datasets from the data lake.
+
+1) Market dataset (features + labels)
+```bash
+python scripts/build_market_dataset.py \
+  --exchange binance \
+  --symbol BTC/USDT \
+  --timeframe 1m \
+  --out datasets/market_btcusdt_1m.parquet
+```
+This reads Parquet under `MARKET_PATH`, computes our standard market features, and adds labels (next‑bar return and direction).
+
+2) RSS → Parquet (one shot)
+```bash
+python scripts/rss_to_parquet.py --feed https://news.google.com/rss/search?q=bitcoin
+```
+Writes normalized RSS entries to `NEWS_PATH/rss/...` using the Parquet writer (supports S3/GCS if configured).
+
+3) Training matrix (market + aggregates from RSS/Reddit)
+```bash
+python scripts/build_training_matrix.py \
+  --exchange binance \
+  --symbol BTC/USDT \
+  --timeframe 1min \
+  --include-rss \
+  --out datasets/training_matrix_btcusdt_1m.parquet
+```
+This merges market features with aggregated counts and mean sentiment for RSS/Reddit (if present), and builds labels.
+
+Notes
+- Scripts read from the data lake paths configured in env (local or S3/GCS). For S3/GCS, ensure credentials/env are set as described above.
+- The training matrix script expects that some RSS or Reddit Parquet exists; you can generate it via the `rss_to_parquet.py` script or schedule ingest jobs.
+
+---
+
 ## Object Storage (S3/GCS) via fsspec (Opt-in)
 
 The Parquet writer supports any fsspec backend. To write directly to object storage:
