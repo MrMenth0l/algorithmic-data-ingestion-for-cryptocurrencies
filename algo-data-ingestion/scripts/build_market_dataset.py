@@ -14,6 +14,13 @@ from app.ingestion_service.config import settings
 from app.features.factory.market_factory import build_market_features
 
 
+def _sanitize_part(val: str) -> str:
+    """Mirror partition sanitization used by the writer.
+    Replaces '/' with '-' and spaces with '_'.
+    """
+    return str(val).replace("/", "-").replace(" ", "_")
+
+
 def _fs_and_root(path: str):
     opts = {}
     if settings.FSSPEC_STORAGE_OPTIONS:
@@ -31,12 +38,15 @@ def _glob(fs, root: str, pattern: str) -> List[str]:
         return []
 
 
-def load_ohlcv(exchange: str, symbol: str) -> pd.DataFrame:
+def load_ohlcv(exchange: str, symbol: str, timeframe: Optional[str] = None) -> pd.DataFrame:
     base = settings.MARKET_PATH
     fs, root = _fs_and_root(base)
     # Read all files for (exchange, symbol)
-    sym_part = symbol
+    sym_part = _sanitize_part(symbol)
     parts = _glob(fs, root, f"exchange={exchange}/symbol={sym_part}/**/*.parquet")
+    if not parts:
+        # Fallback to legacy/unsanitized symbol partition just in case
+        parts = _glob(fs, root, f"exchange={exchange}/symbol={symbol}/**/*.parquet")
     if not parts:
         raise SystemExit(f"No Parquet found under {base}/exchange={exchange}/symbol={symbol}")
     dfs = []
@@ -54,6 +64,12 @@ def load_ohlcv(exchange: str, symbol: str) -> pd.DataFrame:
         df["timestamp"] = pd.to_datetime(df["time"], utc=True, errors="coerce")
     else:
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    # Optional: filter timeframe if present
+    if timeframe and "timeframe" in df.columns:
+        try:
+            df = df[df["timeframe"].astype(str) == str(timeframe)].copy()
+        except Exception:
+            pass
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
@@ -71,9 +87,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--symbol", required=True, help="e.g. BTC/USDT")
     ap.add_argument("--timeframe", default="1m")
     ap.add_argument("--out", default="datasets/market.parquet")
+    ap.add_argument("--start-date", default=None, help="Optional ISO date to filter from (e.g., 2025-01-01)")
+    ap.add_argument("--end-date", default=None, help="Optional ISO date to filter to (e.g., 2025-12-31)")
     args = ap.parse_args(argv)
 
-    raw = load_ohlcv(args.exchange, args.symbol)
+    raw = load_ohlcv(args.exchange, args.symbol, timeframe=args.timeframe)
+    if args.start_date:
+        raw = raw[raw['timestamp'] >= pd.to_datetime(args.start_date, utc=True)]
+    if args.end_date:
+        raw = raw[raw['timestamp'] <= pd.to_datetime(args.end_date, utc=True)]
     # Ensure identifiers
     for col, val in (("symbol", args.symbol), ("exchange", args.exchange), ("timeframe", args.timeframe)):
         if col not in raw.columns:
@@ -91,4 +113,3 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

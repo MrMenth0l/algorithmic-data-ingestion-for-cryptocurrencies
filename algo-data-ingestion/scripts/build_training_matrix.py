@@ -15,6 +15,13 @@ from app.ingestion_service.config import settings
 from app.features.factory.market_factory import build_market_features
 
 
+def _sanitize_part(val: str) -> str:
+    """Mirror partition sanitization used by the writer.
+    Replaces '/' with '-' and spaces with '_'.
+    """
+    return str(val).replace("/", "-").replace(" ", "_")
+
+
 def _fs_and_root(path: str):
     opts = {}
     if settings.FSSPEC_STORAGE_OPTIONS:
@@ -32,10 +39,14 @@ def _glob(fs, root: str, pattern: str) -> List[str]:
         return []
 
 
-def load_market(exchange: str, symbol: str) -> pd.DataFrame:
+def load_market(exchange: str, symbol: str, timeframe: Optional[str] = None) -> pd.DataFrame:
     base = settings.MARKET_PATH
     fs, root = _fs_and_root(base)
-    parts = _glob(fs, root, f"exchange={exchange}/symbol={symbol}/**/*.parquet")
+    sym_part = _sanitize_part(symbol)
+    parts = _glob(fs, root, f"exchange={exchange}/symbol={sym_part}/**/*.parquet")
+    if not parts:
+        # Fallback to legacy/unsanitized symbol partition
+        parts = _glob(fs, root, f"exchange={exchange}/symbol={symbol}/**/*.parquet")
     if not parts:
         raise SystemExit("No market Parquet found")
     dfs = []
@@ -47,6 +58,12 @@ def load_market(exchange: str, symbol: str) -> pd.DataFrame:
             continue
     df = pd.concat(dfs, ignore_index=True)
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    # Optional timeframe filter if column exists
+    if timeframe and "timeframe" in df.columns:
+        try:
+            df = df[df["timeframe"].astype(str) == str(timeframe)].copy()
+        except Exception:
+            pass
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
@@ -83,7 +100,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = ap.parse_args(argv)
 
     # Market
-    mkt = load_market(args.exchange, args.symbol)
+    mkt = load_market(args.exchange, args.symbol, timeframe=args.timeframe)
     for col, val in (("symbol", args.symbol), ("exchange", args.exchange), ("timeframe", args.timeframe)):
         if col not in mkt.columns:
             mkt[col] = val
@@ -150,4 +167,3 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
